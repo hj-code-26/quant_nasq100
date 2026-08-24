@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+torch
+scikit-learn
+numpy
+pandas
+yfinance
+gs-quant
+matplotlib
+anthropic
+joblib

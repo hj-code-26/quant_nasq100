@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# AI 감사 에이전트가 만드는 패치 백업
+*.py.bak
+
+# 학습된 VAE 가중치 / 스캔 결과 캐시 (재생성 가능, 용량 큼)
+models_cache/*.pt
+models_cache/*.joblib
+models_cache/scan_results.json
+
+# macOS
+.DS_Store

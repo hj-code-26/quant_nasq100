@@ -1,0 +1,585 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GAF·VAE Quant — 주가 예측</title>
+<style>
+:root{
+  --bg:#0d1117; --panel:#161b22; --border:#2d333b; --text:#e6edf3; --muted:#8b949e;
+  --up:#f0524f; --down:#3b82f6; --accent:#58a6ff; --gold:#e3b341; --green:#3fb950;
+}
+*{box-sizing:border-box; margin:0; padding:0}
+body{background:var(--bg); color:var(--text); font-family:'Apple SD Gothic Neo','Pretendard',-apple-system,sans-serif; padding:18px 22px}
+h1{font-size:19px; font-weight:700}
+h2{font-size:14px; color:var(--muted); font-weight:600; margin-bottom:10px; letter-spacing:.3px}
+header{display:flex; align-items:center; gap:14px; flex-wrap:wrap; margin-bottom:12px}
+header .sub{color:var(--muted); font-size:12px}
+.controls{display:flex; gap:8px; margin-left:auto; align-items:center}
+input#ticker{background:var(--panel); border:1px solid var(--border); color:var(--text);
+  padding:8px 12px; border-radius:8px; width:110px; font-size:14px; text-transform:uppercase}
+button{background:var(--accent); border:0; color:#08131f; font-weight:700; padding:8px 16px;
+  border-radius:8px; cursor:pointer; font-size:13px}
+button:disabled{opacity:.5; cursor:default}
+button.ghost{background:transparent; color:var(--muted); border:1px solid var(--border)}
+.tabs{display:flex; gap:4px; margin-bottom:14px; border-bottom:1px solid var(--border)}
+.tabs .tab{background:transparent; color:var(--muted); border:0; border-bottom:2px solid transparent;
+  border-radius:0; padding:9px 16px; font-size:13.5px; font-weight:600}
+.tabs .tab.active{color:var(--text); border-bottom-color:var(--accent)}
+.quote{display:flex; gap:10px; align-items:baseline}
+.quote .px{font-size:26px; font-weight:800}
+.quote .chg{font-size:14px; font-weight:700}
+.live-dot{width:8px;height:8px;border-radius:50%;background:var(--green);display:inline-block;
+  animation:blink 1.6s infinite}
+@keyframes blink{50%{opacity:.25}}
+.grid{display:grid; grid-template-columns:2.1fr 1fr; gap:14px}
+.panel{background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:14px}
+.full{grid-column:1/-1}
+canvas{width:100%; display:block}
+#progressWrap{margin:0 0 14px; display:none}
+.pbar{height:6px; background:#21262d; border-radius:3px; overflow:hidden}
+.pbar>div{height:100%; width:0; background:var(--accent); transition:width .4s}
+.pmsg{font-size:12px; color:var(--muted); margin-top:6px}
+.pred-main{display:flex; align-items:center; gap:18px; margin:6px 0 12px}
+.pred-num .dir{font-size:22px; font-weight:800}
+.pred-num .p{font-size:13px; color:var(--muted)}
+.kv{display:grid; grid-template-columns:1fr 1fr; gap:8px; font-size:13px}
+.kv .cell{background:#0d1117; border:1px solid var(--border); border-radius:8px; padding:8px 10px}
+.kv .k{color:var(--muted); font-size:11px; margin-bottom:3px}
+.kv .v{font-weight:700; font-size:15px}
+.models{display:flex; gap:6px; margin-top:10px}
+.models .m{flex:1; text-align:center; background:#0d1117; border:1px solid var(--border);
+  border-radius:8px; padding:6px 4px; font-size:11px; color:var(--muted)}
+.models .m b{display:block; font-size:14px; color:var(--text)}
+table{width:100%; border-collapse:collapse; font-size:12.5px}
+th,td{padding:6px 8px; text-align:right; border-bottom:1px solid var(--border)}
+th{color:var(--muted); font-weight:600; white-space:nowrap}
+td:first-child, th:first-child{text-align:left}
+tr.click{cursor:pointer}
+tr.click:hover td{background:#1c2129}
+.hitgood{color:var(--green); font-weight:700}
+.hitbad{color:var(--up)}
+.tag{display:inline-block; padding:2px 8px; border-radius:20px; font-size:11px; font-weight:700}
+.tag.up{background:rgba(240,82,79,.15); color:var(--up)}
+.tag.down{background:rgba(59,130,246,.15); color:var(--down)}
+.tag.flat{background:rgba(139,148,158,.15); color:var(--muted)}
+.tag.ok{background:rgba(63,185,80,.15); color:var(--green)}
+.tag.bad{background:rgba(240,82,79,.15); color:var(--up)}
+.note{font-size:11px; color:var(--muted); margin-top:8px; line-height:1.5}
+#gafImg{width:100%; max-width:280px; border-radius:8px; margin:0 auto; display:block}
+.flexrow{display:flex; gap:14px; align-items:flex-start}
+.logbox{background:#0d1117; border:1px solid var(--border); border-radius:8px; padding:10px;
+  font-family:ui-monospace,monospace; font-size:11.5px; max-height:320px; overflow-y:auto;
+  line-height:1.7; color:#a5b0bd}
+.stats-row{display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px}
+.stats-row .cell{flex:1; min-width:100px; background:#0d1117; border:1px solid var(--border);
+  border-radius:8px; padding:8px 10px}
+.stats-row .k{color:var(--muted); font-size:11px}
+.stats-row .v{font-weight:800; font-size:16px; margin-top:2px}
+@media(max-width:1100px){.grid{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>📈 GAF·VAE Quant <span style="color:var(--muted);font-weight:400;font-size:13px">— 촛대차트 극좌표 인코딩 + 변이형 오토인코더 주가 예측</span></h1>
+    <div class="sub">GADF+GASF 2채널 → VAE 잠재변수(15) → 로지스틱·SVM·랜덤포레스트 앙상블 · 분석 루틴: Goldman Sachs gs-quant · 코드 검증: Claude AI</div>
+  </div>
+  <div class="controls">
+    <div class="quote" id="quoteBox" style="display:none">
+      <span class="live-dot"></span>
+      <span class="px" id="qPrice">—</span>
+      <span class="chg" id="qChg"></span>
+    </div>
+    <input id="ticker" value="AAPL" placeholder="티커">
+    <button id="btnRun">분석 실행</button>
+  </div>
+</header>
+
+<div class="tabs">
+  <button class="tab active" data-tab="analyze">종목 분석</button>
+  <button class="tab" data-tab="scan">NASDAQ-100 스캔</button>
+  <button class="tab" data-tab="audit">AI 코드 감사</button>
+</div>
+
+<!-- ============ 탭 1: 종목 분석 ============ -->
+<div id="tab-analyze">
+<div id="progressWrap" class="panel full">
+  <div class="pbar" id="progressBar"><div></div></div>
+  <div class="pmsg" id="progressMsg">대기 중…</div>
+</div>
+
+<div class="grid" id="dash" style="display:none">
+  <div class="panel">
+    <h2>주가 차트 · 예상 주가 <span id="asOf" style="float:right"></span></h2>
+    <canvas id="chart" height="380"></canvas>
+    <h2 style="margin-top:14px">모형 신호 타임라인 (상승 확률) — 시기 분석</h2>
+    <canvas id="signalChart" height="120"></canvas>
+    <div class="note" id="sigNote"></div>
+  </div>
+
+  <div class="panel">
+    <h2>익일 종가 예측 (앙상블)</h2>
+    <div class="pred-main">
+      <canvas id="gauge" width="240" height="140" style="width:120px;height:70px"></canvas>
+      <div class="pred-num">
+        <div class="dir" id="pDir">—</div>
+        <div class="p" id="pProb">—</div>
+        <div class="p" id="pThr"></div>
+      </div>
+    </div>
+    <div class="kv">
+      <div class="cell"><div class="k">현재 종가</div><div class="v" id="vLast">—</div></div>
+      <div class="cell"><div class="k">예상 주가 (익일)</div><div class="v" id="vExp" style="color:var(--gold)">—</div></div>
+      <div class="cell"><div class="k">기대 수익률</div><div class="v" id="vRet">—</div></div>
+      <div class="cell"><div class="k">±1σ 밴드</div><div class="v" id="vBand" style="font-size:12.5px">—</div></div>
+    </div>
+    <div class="models" id="modelProbs"></div>
+
+    <h2 style="margin-top:14px">다중 시계 예상 주가</h2>
+    <table id="horizonTable"></table>
+
+    <h2 style="margin-top:14px">gs-quant 지표</h2>
+    <div class="kv" id="indGrid"></div>
+
+    <h2 style="margin-top:14px">GAF 인코딩 (최근 20일 OHLC)</h2>
+    <img id="gafImg" alt="GAF">
+  </div>
+
+  <div class="panel full">
+    <h2>표본 외 백테스트 — Walk-forward 예측 기반 전략 성과</h2>
+    <div class="stats-row" id="btStats"></div>
+    <canvas id="btChart" height="170"></canvas>
+    <div class="note">Walk-forward 검증의 표본 외(out-of-sample) 예측만 사용. 전략: 확률 ≥ 매수임계 매수 / ≤ 매도임계 청산, 거래비용 5bp.</div>
+  </div>
+
+  <div class="panel full">
+    <div class="flexrow" style="flex-wrap:wrap">
+      <div style="flex:1.4; min-width:420px">
+        <h2>Walk-forward 검증 — 기간별 모형 성능 (시기 분석)</h2>
+        <table id="wfTable"></table>
+        <div class="note">각 Walk 은 해당 시점 이전 전체 데이터로 학습 후 다음 1개월(≈21거래일)을 검증. 논문 3.4.4절 방식.</div>
+      </div>
+      <div style="flex:1; min-width:340px">
+        <h2>Walk 별 앙상블 정확도</h2>
+        <canvas id="wfChart" height="180"></canvas>
+        <h2 style="margin-top:12px">최근 예측 적중 내역</h2>
+        <table id="hitTable"></table>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+
+<!-- ============ 탭 2: NASDAQ-100 스캔 ============ -->
+<div id="tab-scan" style="display:none">
+  <div class="panel" style="margin-bottom:14px">
+    <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap">
+      <button id="btnScan">전체 스캔 시작</button>
+      <button id="btnScanStop" class="ghost">중지</button>
+      <span class="pmsg" id="scanMsg">NASDAQ-100 전 종목에 GAF·VAE 고속 파이프라인(2년, 8 epochs)을 적용해 Walk-forward 표본 외 정확도로 정렬합니다.</span>
+    </div>
+    <div class="pbar" style="margin-top:10px"><div id="scanBar"></div></div>
+  </div>
+  <div class="panel">
+    <h2>정확도 순위 <span id="scanCount" style="float:right"></span></h2>
+    <table id="scanTable"></table>
+    <div class="note">행 클릭 시 해당 종목의 정밀 분석(5년, 25 epochs)으로 이동. 정확도: Walk-forward 앙상블 평균(표본 외).</div>
+  </div>
+</div>
+
+<!-- ============ 탭 3: AI 코드 감사 ============ -->
+<div id="tab-audit" style="display:none">
+  <div class="panel" style="margin-bottom:14px">
+    <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap">
+      <button id="btnAudit">감사 실행</button>
+      <label style="font-size:12.5px; color:var(--muted)">
+        <input type="checkbox" id="autoFix" checked> AI 자동 수정 (Claude API)
+      </label>
+      <span class="tag flat" id="auditStatus">대기</span>
+    </div>
+    <div class="note">진단 루틴: GAF 수학적 불변식(반대칭·대각·범위) → 데이터셋 무결성 → VAE 사후분포 붕괴 검사 → 분류기·Walk-forward 건전성 → gs-quant 지표 검증.
+    실패 시 Claude 가 원인 분석 후 최소 패치 제안 → 백업 후 적용 → 재진단 → 개선 없으면 자동 롤백. (AI 수정에는 ANTHROPIC_API_KEY 필요)</div>
+  </div>
+  <div class="grid">
+    <div class="panel">
+      <h2>진단 결과</h2>
+      <table id="checkTable"></table>
+      <div id="patchList" class="note"></div>
+    </div>
+    <div class="panel">
+      <h2>감사 로그</h2>
+      <div class="logbox" id="auditLog">아직 실행되지 않았습니다.</div>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let R = null, currentTicker = 'AAPL';
+const fmt = (v,d=2) => (v==null||isNaN(v)) ? '—' : Number(v).toLocaleString('en-US',{minimumFractionDigits:d,maximumFractionDigits:d});
+
+// ---------- 탭 ----------
+document.querySelectorAll('.tabs .tab').forEach(b=>{
+  b.onclick=()=>{
+    document.querySelectorAll('.tabs .tab').forEach(x=>x.classList.remove('active'));
+    b.classList.add('active');
+    ['analyze','scan','audit'].forEach(t=>$('tab-'+t).style.display = t===b.dataset.tab?'block':'none');
+    if(b.dataset.tab==='scan') pollScan();
+    if(b.dataset.tab==='audit') pollAudit(false);
+    if(b.dataset.tab==='analyze' && R){ drawChart(); drawSignals(); renderWF(); drawBacktest(); }
+  };
+});
+
+// ---------- 분석 실행 / 폴링 ----------
+async function runAnalysis(force=true){
+  currentTicker = $('ticker').value.trim().toUpperCase() || 'AAPL';
+  $('btnRun').disabled = true;
+  $('progressWrap').style.display = 'block';
+  await fetch(`/api/analyze?ticker=${currentTicker}&force=${force}`, {method:'POST'});
+  poll();
+}
+async function poll(){
+  const st = await (await fetch(`/api/status?ticker=${currentTicker}`)).json();
+  $('progressBar').firstElementChild.style.width = ((st.progress||0)*100)+'%';
+  $('progressMsg').textContent = st.message || st.status;
+  if(st.status==='done'){
+    R = await (await fetch(`/api/result?ticker=${currentTicker}`)).json();
+    render();
+    $('progressWrap').style.display='none';
+    $('btnRun').disabled = false;
+  } else if(st.status==='error'){
+    $('progressMsg').textContent = st.message;
+    $('btnRun').disabled = false;
+  } else setTimeout(poll, 1200);
+}
+
+// ---------- 실시간 호가 ----------
+async function refreshQuote(){
+  try{
+    const q = await (await fetch(`/api/quote?ticker=${currentTicker}`)).json();
+    if(q.price){
+      $('quoteBox').style.display='flex';
+      $('qPrice').textContent = fmt(q.price);
+      const c = q.change_pct;
+      $('qChg').textContent = c==null ? '' : (c>=0?'▲ ':'▼ ')+fmt(Math.abs(c))+'%';
+      $('qChg').style.color = c>=0 ? 'var(--up)' : 'var(--down)';
+    }
+  }catch(e){}
+}
+setInterval(refreshQuote, 15000);
+setInterval(()=>{ if(R) runAnalysis(false); }, 3600*1000);
+
+// ---------- 렌더링 ----------
+function render(){
+  $('dash').style.display='grid';
+  $('asOf').textContent = `기준일 ${R.as_of} · 이미지 ${R.n_images.toLocaleString()}장 × ${R.channels}채널`;
+  const P = R.prediction;
+  $('pDir').textContent = P.direction;
+  $('pDir').style.color = P.direction==='중립' ? 'var(--muted)' : (P.p_up>=P.threshold ? 'var(--up)' : 'var(--down)');
+  $('pProb').textContent = `상승 확률 ${(P.p_up*100).toFixed(1)}%`;
+  $('pThr').textContent = `보정 임계값 ${P.threshold.toFixed(2)} (검증 정확도 ${(P.calibrated_acc*100).toFixed(1)}%)`;
+  $('vLast').textContent = fmt(P.last_close);
+  $('vExp').textContent = fmt(P.expected_price);
+  $('vRet').textContent = (P.expected_return_pct>=0?'+':'')+fmt(P.expected_return_pct)+'%';
+  $('vRet').style.color = P.expected_return_pct>=0 ? 'var(--up)' : 'var(--down)';
+  $('vBand').textContent = `${fmt(P.band_low)} ~ ${fmt(P.band_high)}`;
+  $('modelProbs').innerHTML = ['logistic','svm','rf'].map(m=>
+    `<div class="m">${{logistic:'로지스틱',svm:'SVM',rf:'랜덤포레스트'}[m]}<b>${(P.per_model[m]*100).toFixed(1)}%</b></div>`).join('');
+  drawGauge(P.p_up);
+
+  $('horizonTable').innerHTML = `<tr><th>기간</th><th>예상 주가</th><th>수익률</th><th>밴드</th></tr>` +
+    P.horizons.map(h=>`<tr><td>${h.horizon}일</td><td><b>${fmt(h.expected_price)}</b></td>
+      <td style="color:${h.expected_return_pct>=0?'var(--up)':'var(--down)'}">${(h.expected_return_pct>=0?'+':'')+fmt(h.expected_return_pct)}%</td>
+      <td>${fmt(h.band_low)} ~ ${fmt(h.band_high)}</td></tr>`).join('');
+
+  const I = R.indicators;
+  const rows = [
+    ['MA20 / MA60', `${fmt(I.ma20)} / ${fmt(I.ma60)}`],
+    ['변동성(20일, 연율)', fmt(I.volatility_20d)+'%'],
+    ['RSI(14)', fmt(I.rsi_14,1)],
+    ['MACD', fmt(I.macd,3)],
+    ['볼린저 밴드', `${fmt(I.bb_low)} ~ ${fmt(I.bb_high)}`],
+    ['최대 낙폭(1년)', fmt(I.max_drawdown_1y*100,1)+'%'],
+  ];
+  $('indGrid').innerHTML = rows.map(([k,v])=>`<div class="cell"><div class="k">${k}</div><div class="v" style="font-size:13px">${v}</div></div>`).join('');
+  $('gafImg').src = 'data:image/png;base64,'+R.gaf_png;
+  $('sigNote').textContent = `확률 ≥ ${(P.threshold+0.03).toFixed(2)} 매수 신호(▲), ≤ ${(P.threshold-0.03).toFixed(2)} 매도 신호(▼). 회색 밴드는 중립 구간.`;
+
+  drawChart(); drawSignals(); renderWF(); drawBacktest(); refreshQuote();
+}
+
+function drawGauge(p){
+  const cv=$('gauge'), ctx=cv.getContext('2d');
+  ctx.clearRect(0,0,240,140);
+  const cx=120, cy=125, r=95;
+  ctx.lineWidth=18; ctx.lineCap='round';
+  ctx.strokeStyle='#21262d';
+  ctx.beginPath(); ctx.arc(cx,cy,r,Math.PI,2*Math.PI); ctx.stroke();
+  const grad=ctx.createLinearGradient(0,0,240,0);
+  grad.addColorStop(0,'#3b82f6'); grad.addColorStop(1,'#f0524f');
+  ctx.strokeStyle=grad;
+  ctx.beginPath(); ctx.arc(cx,cy,r,Math.PI,Math.PI*(1+p)); ctx.stroke();
+  const a=Math.PI*(1+p);
+  ctx.strokeStyle='#e6edf3'; ctx.lineWidth=3;
+  ctx.beginPath(); ctx.moveTo(cx,cy);
+  ctx.lineTo(cx+Math.cos(a)*(r-24), cy+Math.sin(a)*(r-24)); ctx.stroke();
+}
+
+function setupCanvas(cv){
+  const dpr=window.devicePixelRatio||1;
+  if(!cv.dataset.h) cv.dataset.h = cv.getAttribute('height');
+  const w=cv.clientWidth, h=parseInt(cv.dataset.h);
+  cv.width=w*dpr; cv.height=h*dpr; cv.style.height=h+'px';
+  const ctx=cv.getContext('2d'); ctx.setTransform(dpr,0,0,dpr,0,0);
+  return [ctx,w,h];
+}
+
+function drawChart(){
+  const cv=$('chart'); const [ctx,W,H]=setupCanvas(cv);
+  const C=R.candles, P=R.prediction;
+  const buyT=P.threshold+0.03, sellT=P.threshold-0.03;
+  const padL=8, padR=64, padT=10, padB=22;
+  const n=C.length, extra=4;
+  const lows=C.map(d=>d.l), highs=C.map(d=>d.h);
+  let mn=Math.min(...lows, P.band_low), mx=Math.max(...highs, P.band_high);
+  const bbh=R.overlays.bb_high, bbl=R.overlays.bb_low;
+  if(bbh) bbh.forEach(v=>{if(v!=null){mn=Math.min(mn,v);mx=Math.max(mx,v);}});
+  if(bbl) bbl.forEach(v=>{if(v!=null){mn=Math.min(mn,v);}});
+  const pad=(mx-mn)*0.04; mn-=pad; mx+=pad;
+  const xw=(W-padL-padR)/(n+extra);
+  const X=i=>padL+xw*(i+0.5), Y=v=>padT+(H-padT-padB)*(1-(v-mn)/(mx-mn));
+
+  ctx.clearRect(0,0,W,H);
+  ctx.font='10px sans-serif'; ctx.fillStyle='#8b949e'; ctx.strokeStyle='#21262d';
+  for(let g=0; g<=4; g++){
+    const v=mn+(mx-mn)*g/4, y=Y(v);
+    ctx.beginPath(); ctx.moveTo(padL,y); ctx.lineTo(W-padR,y); ctx.stroke();
+    ctx.fillText(fmt(v), W-padR+6, y+3);
+  }
+  let lastM='';
+  C.forEach((d,i)=>{ const m=d.date.slice(0,7);
+    if(m!==lastM){ lastM=m; ctx.fillText(d.date.slice(2,7), X(i)-12, H-6); }});
+  if(bbh&&bbl){
+    ctx.beginPath(); let started=false;
+    C.forEach((d,i)=>{ if(bbh[i]!=null){ const x=X(i),y=Y(bbh[i]); started?ctx.lineTo(x,y):ctx.moveTo(x,y); started=true; }});
+    for(let i=n-1;i>=0;i--){ if(bbl[i]!=null) ctx.lineTo(X(i),Y(bbl[i])); }
+    ctx.closePath(); ctx.fillStyle='rgba(88,166,255,.06)'; ctx.fill();
+  }
+  const line=(arr,color)=>{ if(!arr) return;
+    ctx.beginPath(); let st=false;
+    C.forEach((d,i)=>{ if(arr[i]!=null){ const x=X(i),y=Y(arr[i]); st?ctx.lineTo(x,y):ctx.moveTo(x,y); st=true; }});
+    ctx.strokeStyle=color; ctx.lineWidth=1.4; ctx.stroke(); };
+  line(R.overlays.ma20,'#e3b341'); line(R.overlays.ma60,'#bc8cff');
+  const sigByDate={}; R.signals.forEach(s=>sigByDate[s.date]=s.prob);
+  const bw=Math.max(2, xw*0.6);
+  C.forEach((d,i)=>{
+    const x=X(i), up=d.c>=d.o, col=up?'#f0524f':'#3b82f6';
+    ctx.strokeStyle=col; ctx.fillStyle=col; ctx.lineWidth=1;
+    ctx.beginPath(); ctx.moveTo(x,Y(d.h)); ctx.lineTo(x,Y(d.l)); ctx.stroke();
+    const y1=Y(Math.max(d.o,d.c)), y2=Y(Math.min(d.o,d.c));
+    ctx.fillRect(x-bw/2, y1, bw, Math.max(1,y2-y1));
+    const p=sigByDate[d.date];
+    if(p!=null && p>=buyT){ ctx.fillStyle='#3fb950'; ctx.beginPath();
+      ctx.moveTo(x,Y(d.l)+14); ctx.lineTo(x-4,Y(d.l)+21); ctx.lineTo(x+4,Y(d.l)+21); ctx.fill(); }
+    else if(p!=null && p<=sellT){ ctx.fillStyle='#f0524f'; ctx.beginPath();
+      ctx.moveTo(x,Y(d.h)-14); ctx.lineTo(x-4,Y(d.h)-21); ctx.lineTo(x+4,Y(d.h)-21); ctx.fill(); }
+  });
+  const xe=X(n+1.5), last=C[n-1];
+  ctx.setLineDash([4,4]); ctx.strokeStyle='#e3b341'; ctx.lineWidth=1.4;
+  ctx.beginPath(); ctx.moveTo(X(n-1),Y(last.c)); ctx.lineTo(xe,Y(P.expected_price)); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle='rgba(227,179,65,.18)';
+  ctx.fillRect(xe-9, Y(P.band_high), 18, Y(P.band_low)-Y(P.band_high));
+  ctx.fillStyle='#e3b341';
+  ctx.beginPath(); ctx.arc(xe, Y(P.expected_price), 4.5, 0, 7); ctx.fill();
+  ctx.font='bold 11px sans-serif';
+  ctx.fillText('예상 '+fmt(P.expected_price), xe-30, Y(P.expected_price)-10);
+  ctx.font='10px sans-serif';
+  const lg=[['MA20','#e3b341'],['MA60','#bc8cff'],['볼린저','rgba(88,166,255,.6)'],['▲매수신호','#3fb950'],['▼매도신호','#f0524f']];
+  let lx=padL+4; lg.forEach(([t,c])=>{ ctx.fillStyle=c; ctx.fillRect(lx,padT,8,8);
+    ctx.fillStyle='#8b949e'; ctx.fillText(t,lx+11,padT+8); lx+=ctx.measureText(t).width+34; });
+}
+
+function drawSignals(){
+  const cv=$('signalChart'); const [ctx,W,H]=setupCanvas(cv);
+  const S=R.signals, P=R.prediction, padL=8, padR=64, padT=8, padB=16;
+  const buyT=P.threshold+0.03, sellT=P.threshold-0.03;
+  const X=i=>padL+(W-padL-padR)*(i/(S.length-1)), Y=p=>padT+(H-padT-padB)*(1-p);
+  ctx.clearRect(0,0,W,H);
+  ctx.fillStyle='rgba(139,148,158,.12)';
+  ctx.fillRect(padL, Y(buyT), W-padL-padR, Y(sellT)-Y(buyT));
+  ctx.strokeStyle='#21262d';
+  [0.3,0.5,0.7].forEach(v=>{ ctx.beginPath(); ctx.moveTo(padL,Y(v)); ctx.lineTo(W-padR,Y(v)); ctx.stroke();
+    ctx.fillStyle='#8b949e'; ctx.font='9px sans-serif'; ctx.fillText(v.toFixed(2), W-padR+6, Y(v)+3); });
+  ctx.beginPath();
+  S.forEach((s,i)=>{ const x=X(i),y=Y(Math.max(0.25,Math.min(0.75,s.prob))); i?ctx.lineTo(x,y):ctx.moveTo(x,y); });
+  ctx.strokeStyle='#58a6ff'; ctx.lineWidth=1.6; ctx.stroke();
+  S.forEach((s,i)=>{ if(s.prob>=buyT||s.prob<=sellT){
+    ctx.fillStyle=s.prob>=buyT?'#3fb950':'#f0524f';
+    ctx.beginPath(); ctx.arc(X(i),Y(Math.max(0.25,Math.min(0.75,s.prob))),2.4,0,7); ctx.fill(); }});
+  ctx.fillStyle='#8b949e'; ctx.font='9px sans-serif';
+  ctx.fillText(S[0].date, padL, H-4); ctx.fillText(S[S.length-1].date, W-padR-56, H-4);
+}
+
+function drawBacktest(){
+  const B=R.backtest;
+  if(!B){ $('btStats').innerHTML='<div class="note">백테스트 데이터 부족</div>'; return; }
+  const s=B.stats;
+  const col=v=>v>=0?'var(--up)':'var(--down)';
+  $('btStats').innerHTML = [
+    ['전략 수익률', (s.strategy_return_pct>=0?'+':'')+fmt(s.strategy_return_pct)+'%', col(s.strategy_return_pct)],
+    ['단순보유 수익률', (s.buyhold_return_pct>=0?'+':'')+fmt(s.buyhold_return_pct)+'%', col(s.buyhold_return_pct)],
+    ['샤프 비율', fmt(s.sharpe), s.sharpe>=1?'var(--green)':'var(--text)'],
+    ['최대 낙폭', fmt(s.mdd_pct)+'%', 'var(--down)'],
+    ['승률', fmt(s.win_rate_pct,1)+'%', 'var(--text)'],
+    ['매매 횟수', s.trades+'회 / '+s.days+'일', 'var(--text)'],
+  ].map(([k,v,c])=>`<div class="cell"><div class="k">${k}</div><div class="v" style="color:${c}">${v}</div></div>`).join('');
+
+  const cv=$('btChart'); const [ctx,W,H]=setupCanvas(cv);
+  const C=B.curve, padL=8, padR=64, padT=8, padB=16;
+  let mn=Infinity, mx=-Infinity;
+  C.forEach(p=>{ mn=Math.min(mn,p.strategy,p.buyhold); mx=Math.max(mx,p.strategy,p.buyhold); });
+  const pad=(mx-mn)*0.08||0.01; mn-=pad; mx+=pad;
+  const X=i=>padL+(W-padL-padR)*(i/(C.length-1)), Y=v=>padT+(H-padT-padB)*(1-(v-mn)/(mx-mn));
+  ctx.clearRect(0,0,W,H);
+  ctx.strokeStyle='#21262d';
+  for(let g=0;g<=3;g++){ const v=mn+(mx-mn)*g/3, y=Y(v);
+    ctx.beginPath(); ctx.moveTo(padL,y); ctx.lineTo(W-padR,y); ctx.stroke();
+    ctx.fillStyle='#8b949e'; ctx.font='9px sans-serif';
+    ctx.fillText(((v-1)*100).toFixed(1)+'%', W-padR+6, y+3); }
+  // 포지션 보유 구간 음영
+  ctx.fillStyle='rgba(63,185,80,.07)';
+  C.forEach((p,i)=>{ if(p.position===1) ctx.fillRect(X(i)-0.5*(W-padL-padR)/C.length, padT, (W-padL-padR)/C.length+1, H-padT-padB); });
+  const line=(key,color,w)=>{ ctx.beginPath();
+    C.forEach((p,i)=>{ const x=X(i),y=Y(p[key]); i?ctx.lineTo(x,y):ctx.moveTo(x,y); });
+    ctx.strokeStyle=color; ctx.lineWidth=w; ctx.stroke(); };
+  line('buyhold','#8b949e',1.2); line('strategy','#e3b341',1.8);
+  ctx.font='10px sans-serif';
+  ctx.fillStyle='#e3b341'; ctx.fillRect(padL+4,padT,8,8); ctx.fillStyle='#8b949e'; ctx.fillText('전략',padL+15,padT+8);
+  ctx.fillStyle='#8b949e'; ctx.fillRect(padL+50,padT,8,8); ctx.fillText('단순보유',padL+61,padT+8);
+  ctx.fillText(C[0].date, padL, H-4); ctx.fillText(C[C.length-1].date, W-padR-56, H-4);
+}
+
+function renderWF(){
+  const wf=R.walk_forward;
+  let html=`<tr><th>Walk</th><th>검증 기간</th><th>로지스틱</th><th>SVM</th><th>랜덤포레스트</th><th>앙상블 Acc</th><th>F1</th><th>AUC</th></tr>`;
+  wf.walks.forEach(w=>{
+    html+=`<tr><td>${w.walk}</td><td>${w.test_start} ~ ${w.test_end}</td>
+      <td>${(w.logistic.accuracy*100).toFixed(1)}%</td><td>${(w.svm.accuracy*100).toFixed(1)}%</td>
+      <td>${(w.rf.accuracy*100).toFixed(1)}%</td>
+      <td><b>${(w.ensemble.accuracy*100).toFixed(1)}%</b></td>
+      <td>${w.ensemble.f1.toFixed(3)}</td><td>${isNaN(w.ensemble.auc)?'—':w.ensemble.auc.toFixed(3)}</td></tr>`;
+  });
+  const a=wf.average.ensemble;
+  html+=`<tr style="background:#0d1117"><td colspan="5"><b>평균 (앙상블)</b></td>
+    <td><b style="color:var(--gold)">${(a.accuracy*100).toFixed(1)}%</b></td>
+    <td><b>${a.f1.toFixed(3)}</b></td><td><b>${isNaN(a.auc)?'—':a.auc.toFixed(3)}</b></td></tr>`;
+  $('wfTable').innerHTML=html;
+
+  const cv=$('wfChart'); const [ctx,W,H]=setupCanvas(cv);
+  ctx.clearRect(0,0,W,H);
+  const ws=wf.walks, bw=(W-40)/ws.length;
+  ctx.strokeStyle='#8b949e'; ctx.setLineDash([3,3]);
+  const yr=v=>H-18-(H-40)*v;
+  ctx.beginPath(); ctx.moveTo(10,yr(0.5)); ctx.lineTo(W-10,yr(0.5)); ctx.stroke(); ctx.setLineDash([]);
+  ctx.fillStyle='#8b949e'; ctx.font='9px sans-serif'; ctx.fillText('50%', W-32, yr(0.5)-3);
+  ws.forEach((w,i)=>{
+    const v=w.ensemble.accuracy, x=20+bw*i;
+    ctx.fillStyle=v>=0.5?'#3fb950':'#f0524f';
+    ctx.fillRect(x, yr(v), bw*0.55, H-18-yr(v));
+    ctx.fillStyle='#e6edf3'; ctx.font='10px sans-serif';
+    ctx.fillText((v*100).toFixed(0)+'%', x, yr(v)-4);
+    ctx.fillStyle='#8b949e'; ctx.fillText('W'+w.walk, x+2, H-5);
+  });
+
+  const pd=wf.per_day.slice(-10).reverse();
+  let ht=`<tr><th>날짜</th><th>예측확률</th><th>예측</th><th>실제</th><th>적중</th></tr>`;
+  pd.forEach(d=>{
+    const pr=d.prob>=0.5;
+    ht+=`<tr><td>${d.date}</td><td>${(d.prob*100).toFixed(1)}%</td>
+      <td><span class="tag ${pr?'up':'down'}">${pr?'상승':'하락'}</span></td>
+      <td><span class="tag ${d.actual?'up':'down'}">${d.actual?'상승':'하락'}</span></td>
+      <td class="${d.hit?'hitgood':'hitbad'}">${d.hit?'✓':'✗'}</td></tr>`;
+  });
+  $('hitTable').innerHTML=ht;
+}
+
+// ---------- NASDAQ-100 스캔 ----------
+let scanTimer=null;
+$('btnScan').onclick=async()=>{ await fetch('/api/scan/start',{method:'POST'}); pollScan(); };
+$('btnScanStop').onclick=async()=>{ await fetch('/api/scan/stop',{method:'POST'}); };
+async function pollScan(){
+  clearTimeout(scanTimer);
+  const st = await (await fetch('/api/scan/status')).json();
+  const pct = st.total? (st.done/st.total*100):0;
+  $('scanBar').style.width=pct+'%';
+  if(st.status==='running'){
+    const elapsed = st.started_at? Math.round((Date.now()/1000-st.started_at)/60):0;
+    $('scanMsg').textContent=`스캔 중… ${st.done}/${st.total} (현재: ${st.current}, 경과 ${elapsed}분)`;
+    scanTimer=setTimeout(pollScan, 3000);
+  } else if(st.status==='done'){ $('scanMsg').textContent=`스캔 완료 — ${st.results.filter(r=>!r.error).length}종목 분석됨`; }
+  else if(st.status==='stopped'){ $('scanMsg').textContent='중지됨'; }
+  renderScan(st);
+}
+function renderScan(st){
+  const ok=st.results.filter(r=>!r.error), err=st.results.filter(r=>r.error);
+  $('scanCount').textContent = ok.length? `${ok.length}종목 · 실패 ${err.length}`:'';
+  if(!ok.length){ $('scanTable').innerHTML='<tr><td class="note">아직 결과가 없습니다. 스캔을 시작하세요.</td></tr>'; return; }
+  let html=`<tr><th>#</th><th>티커</th><th>WF 정확도</th><th>보정 정확도</th><th>F1</th><th>AUC</th><th>예측</th><th>상승확률</th><th>현재가</th><th>예상가(익일)</th><th>수익률</th></tr>`;
+  ok.forEach((r,i)=>{
+    html+=`<tr class="click" onclick="gotoTicker('${r.ticker}')">
+      <td>${i+1}</td><td><b>${r.ticker}</b></td>
+      <td><b style="color:${r.accuracy>=0.5?'var(--green)':'var(--up)'}">${(r.accuracy*100).toFixed(1)}%</b></td>
+      <td>${(r.calibrated_acc*100).toFixed(1)}%</td>
+      <td>${r.f1.toFixed(3)}</td><td>${isNaN(r.auc)?'—':r.auc.toFixed(3)}</td>
+      <td><span class="tag ${r.direction==='상승'?'up':'down'}">${r.direction}</span></td>
+      <td>${(r.p_up*100).toFixed(1)}%</td>
+      <td>${fmt(r.last_close)}</td><td style="color:var(--gold)">${fmt(r.expected_price)}</td>
+      <td style="color:${r.expected_return_pct>=0?'var(--up)':'var(--down)'}">${(r.expected_return_pct>=0?'+':'')+fmt(r.expected_return_pct)}%</td></tr>`;
+  });
+  $('scanTable').innerHTML=html;
+}
+function gotoTicker(t){
+  $('ticker').value=t;
+  document.querySelector('.tabs .tab[data-tab=analyze]').click();
+  runAnalysis(true);
+}
+
+// ---------- AI 코드 감사 ----------
+let auditTimer=null;
+$('btnAudit').onclick=async()=>{
+  await fetch(`/api/audit/start?auto_fix=${$('autoFix').checked}`,{method:'POST'});
+  pollAudit(true);
+};
+async function pollAudit(loop){
+  clearTimeout(auditTimer);
+  const st = await (await fetch('/api/audit/status')).json();
+  const label={idle:'대기',running:'실행 중…',passed:'전체 통과',fixed:'AI 수정 완료',
+               failed:'실패 항목 있음',error:'오류'}[st.status]||st.status;
+  const cls={passed:'ok',fixed:'ok',failed:'bad',error:'bad'}[st.status]||'flat';
+  $('auditStatus').textContent=label;
+  $('auditStatus').className='tag '+cls;
+  if(st.checks && st.checks.length){
+    $('checkTable').innerHTML = `<tr><th>진단 항목</th><th>결과</th><th>상세</th></tr>` +
+      st.checks.map(c=>`<tr><td>${c.name}</td>
+        <td><span class="tag ${c.passed?'ok':'bad'}">${c.passed?'통과':'실패'}</span></td>
+        <td style="text-align:left; font-size:11.5px; color:var(--muted)">${c.detail}</td></tr>`).join('');
+  }
+  if(st.patches_applied && st.patches_applied.length){
+    $('patchList').innerHTML='적용된 패치: '+st.patches_applied.map(p=>`<b>${p.file}</b>`).join(', ')+' (백업 .py.bak 생성됨)';
+  }
+  if(st.log && st.log.length){
+    $('auditLog').innerHTML = st.log.map(l=>`<div>[${l.t}] ${l.msg}</div>`).join('');
+    $('auditLog').scrollTop = $('auditLog').scrollHeight;
+  }
+  if(st.status==='running' && loop!==false) auditTimer=setTimeout(()=>pollAudit(true), 1500);
+}
+
+$('btnRun').onclick=()=>runAnalysis(true);
+$('ticker').addEventListener('keydown',e=>{ if(e.key==='Enter') runAnalysis(true); });
+window.addEventListener('resize',()=>{ if(R && $('tab-analyze').style.display!=='none'){drawChart();drawSignals();renderWF();drawBacktest();} });
+runAnalysis(false);
+</script>
+</body>
+</html>
