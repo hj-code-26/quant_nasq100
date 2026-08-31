@@ -113,6 +113,50 @@ def analyze(df: pd.DataFrame, p_model: float) -> dict:
     }
 
 
+def p_indicator_asof(df: pd.DataFrame) -> np.ndarray:
+    """
+    각 시점 t 에 대해 't 이전 데이터만으로' 계산한 활성 구간 가중평균 상승확률.
+
+    analyze() 는 전체 기간 통계를 쓴다 — 내일을 예측할 때는 올바르지만,
+    과거 시점의 예측을 채점할 때 그대로 쓰면 그 시점에 알 수 없었던 미래
+    수익률이 구간 통계에 섞인다. walk-forward 채점용으로는 이 함수를 쓴다.
+
+    반환: 길이 len(df) 의 배열. 활성 구간이 없거나 표본이 모자라면 NaN.
+    """
+    series = compute_series(df)
+    nr = df["Close"].pct_change().shift(-1).to_numpy(float)
+    n = len(df)
+    zones = []
+    for key, _label, mask_fn in _ZONES:
+        s = series[key]
+        m = (mask_fn(s) & s.notna()).to_numpy(bool)
+        valid = m & np.isfinite(nr)          # 라벨(익일 수익률)을 아는 행만
+        zones.append((m, np.cumsum(valid), np.cumsum(valid & (nr > 0))))
+    out = np.full(n, np.nan)
+    for t in range(1, n):
+        lim = t - 1        # t 시점에 익일 수익률을 아는 마지막 행
+        ws, ps = [], []
+        for m, cum_n, cum_hit in zones:
+            if not m[t]:
+                continue                     # 현재 활성 구간만 반영
+            cnt = int(cum_n[lim])
+            if cnt < MIN_SAMPLES:
+                continue
+            ws.append(min(cnt, 100))
+            ps.append(cum_hit[lim] / cnt)
+        if ws:
+            w = np.asarray(ws, float)
+            out[t] = float((w * np.asarray(ps, float)).sum() / w.sum())
+    return out
+
+
+def blend(p_model: float, p_ind: float) -> float:
+    """analyze() 와 동일한 블렌딩 규칙 (채점 경로에서 재사용)."""
+    if p_ind is None or not np.isfinite(p_ind):
+        return float(p_model)
+    return float((1 - BLEND_W) * p_model + BLEND_W * p_ind)
+
+
 def chart_series(df: pd.DataFrame, tail: int) -> dict:
     """프론트 차트용 최근 tail 개 지표값 (NaN -> None)."""
     series = compute_series(df)

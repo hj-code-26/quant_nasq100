@@ -329,7 +329,9 @@ function render(){
   $('pThr').textContent = `임계값 ${P.threshold.toFixed(2)} · 표본 외 정확도 ${pct(P.calibrated_acc)} (${ciTxt(cs)})`;
   const base = fs&&fs.baseline!=null ? fs.baseline : 0.5;
   const sig = fs && fs.p_value!=null ? (fs.significant?'기준선 초과, 유의(p<0.05)':`기준선과 구분 불가 (p=${fs.p_value.toFixed(2)})`) : '';
+  const mo = V.model_only;
   $('pVal').innerHTML = `임계값 0.5 고정 ${pct(P.fixed_acc)} vs 기준선(다수 클래스) ${pct(base)} · ${sig}`
+    + (mo? ` · 모형 단독 ${pct(mo.accuracy)}${V.blend_weight?` (보조지표 ${Math.round(V.blend_weight*100)}% 블렌딩 효과 ${((P.fixed_acc-mo.accuracy)*100>=0?'+':'')+((P.fixed_acc-mo.accuracy)*100).toFixed(1)}%p)`:''}`:'')
     + (V.vae_leak_free===false?' · <span style="color:var(--down)">⚠ 표본 부족: VAE가 검증구간 포함 학습</span>':'');
   $('pVal').style.color = (fs&&fs.significant)?'var(--green)':'var(--muted)';
   $('vLast').textContent = fmt(P.last_close);
@@ -685,9 +687,16 @@ function renderWF(){
     <td><b>${n3(a.f1)}</b></td><td><b>${n3(a.auc)}</b></td></tr>`;
   const po=wf.pooled, V=R.validation||{};
   if(po){
-    html+=`<tr style="background:#0d1117"><td colspan="5"><b>전 구간 합산 (임계값 0.5)</b></td>
+    html+=`<tr style="background:#0d1117"><td colspan="5"><b>전 구간 합산 · 모형 단독 (임계값 0.5)</b></td>
       <td><b style="color:${po.significant?'var(--green)':'var(--muted)'}">${pc(po.accuracy)}</b></td>
       <td colspan="2" style="color:var(--muted)">95% CI ${pc(po.ci_low)}~${pc(po.ci_high)} · n=${po.n} · 기준선 ${pc(po.baseline)} · p=${n3(po.p_value)}</td></tr>`;
+  }
+  const bp=V.pooled;
+  if(bp && V.blend_weight){
+    const d=(bp.accuracy-po.accuracy)*100;
+    html+=`<tr style="background:#0d1117"><td colspan="5"><b>전 구간 합산 · 표시 확률 (모형 + 보조지표 ${Math.round(V.blend_weight*100)}%)</b></td>
+      <td><b style="color:${bp.significant?'var(--green)':'var(--muted)'}">${pc(bp.accuracy)}</b></td>
+      <td colspan="2" style="color:var(--muted)">95% CI ${pc(bp.ci_low)}~${pc(bp.ci_high)} · n=${bp.n} · 블렌딩 효과 ${(d>=0?'+':'')+d.toFixed(1)}%p · p=${n3(bp.p_value)}</td></tr>`;
   }
   if(V.rolling){
     html+=`<tr><td colspan="5">롤링 보정 임계값 기준 (직전 walk 로만 결정)</td>
@@ -715,10 +724,11 @@ function renderWF(){
   const pd=wf.per_day.slice(-10).reverse();
   let ht=`<tr><th>날짜</th><th>예측확률</th><th>임계값</th><th>예측</th><th>실제</th><th>적중</th></tr>`;
   pd.forEach(d=>{
-    const th=(d.threshold!=null?d.threshold:0.5);
-    const pr=d.prob>=th;
-    const hit=(d.hit_cal!=null?d.hit_cal:d.hit);
-    ht+=`<tr><td>${d.date}</td><td>${(d.prob*100).toFixed(1)}%</td>
+    const th=(d.threshold_blend!=null?d.threshold_blend:(d.threshold!=null?d.threshold:0.5));
+    const pb=(d.prob_blend!=null?d.prob_blend:d.prob);
+    const pr=pb>=th;
+    const hit=(pb>=th)===(d.actual===1);
+    ht+=`<tr><td>${d.date}</td><td>${(pb*100).toFixed(1)}%</td>
       <td>${th.toFixed(2)}</td>
       <td><span class="tag ${pr?'up':'down'}">${pr?'상승':'하락'}</span></td>
       <td><span class="tag ${d.actual?'up':'down'}">${d.actual?'상승':'하락'}</span></td>

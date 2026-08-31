@@ -216,10 +216,36 @@ def run_analysis(ticker: str, period: str = "5y"):
                                  test_days=TEST_DAYS)
 
         # 수정사항 ①: 임계값은 직전 walk 들로만 결정 → 다음 walk 에 적용
-        cal = bt.rolling_calibration(wf["per_day"])
+        cal_model = bt.rolling_calibration(wf["per_day"])
+
+        # 화면에 표시되는 확률은 보조지표 블렌딩 값(p_combined)이므로, 검증도
+        # 그 확률로 해야 한다. 단 구간 통계는 그 시점 이전 데이터로만 계산한
+        # as-of 값을 쓴다 (analyze() 의 전체기간 통계를 과거 채점에 쓰면 누수).
+        p_ind_asof = indicators.p_indicator_asof(df)
+        pos_by_date = {str(i.date()): k for k, i in enumerate(df.index)}
+        per_day_blend = []
+        for d in wf["per_day"]:
+            k2 = pos_by_date.get(d["date"])
+            pi = p_ind_asof[k2] if k2 is not None else float("nan")
+            pb = indicators.blend(d["prob"], pi)
+            d["prob_blend"] = pb
+            d["p_indicator_asof"] = None if pi != pi else float(pi)
+            per_day_blend.append({
+                "date": d["date"], "walk": d["walk"], "prob": pb,
+                "actual": d["actual"],
+                "hit": bool((pb >= 0.5) == (d["actual"] == 1))})
+        cal = bt.rolling_calibration(per_day_blend)
+        base_rate = models.majority_baseline(d["actual"] for d in wf["per_day"])
+        blend_pooled = models.accuracy_stats(
+            sum(r["hit"] for r in per_day_blend), len(per_day_blend),
+            p0=base_rate)
+        for d, r in zip(wf["per_day"], per_day_blend):
+            d["threshold_blend"] = r.get("threshold")
+
         closes_by_date = {str(i.date()): float(v)
                           for i, v in df["Close"].items()}
-        backtest = bt.run_backtest(wf["per_day"], closes_by_date)
+        # 백테스트도 화면 신호와 같은 확률(블렌딩)로 돌린다
+        backtest = bt.run_backtest(per_day_blend, closes_by_date)
 
         _set(ticker, progress=0.86, message="분류 모형 학습 및 예측 중…")
         bundle = models.fit_classifiers(Zl, yl)
@@ -229,11 +255,15 @@ def run_analysis(ticker: str, period: str = "5y"):
 
         k = min(120, len(Z_all))
         probs_hist = models.predict_proba(bundle, Z_all[-k:])["ensemble"]
-        signal_series = [
-            {"date": str(dates[len(dates) - k + i].date()),
-             "prob": float(probs_hist[i])}
-            for i in range(k)
-        ]
+        signal_series = []
+        for i in range(k):
+            dt = str(dates[len(dates) - k + i].date())
+            k2 = pos_by_date.get(dt)
+            pi = p_ind_asof[k2] if k2 is not None else float("nan")
+            signal_series.append({
+                "date": dt,
+                "prob": indicators.blend(float(probs_hist[i]), pi),
+                "prob_model": float(probs_hist[i])})
 
         _set(ticker, progress=0.93, message="gs-quant·보조지표 분석 중…")
         close = df["Close"]
@@ -285,7 +315,10 @@ def run_analysis(ticker: str, period: str = "5y"):
                 **exp,
             },
             "validation": {
-                "pooled": wf["pooled"],
+                "pooled": blend_pooled,          # 표시 확률(블렌딩) 기준
+                "model_only": wf["pooled"],      # 모형 단독 기준 (비교용)
+                "model_rolling": cal_model["stats"],
+                "blend_weight": indicators.BLEND_W,
                 "rolling": cal["stats"],
                 "insample_accuracy": cal["insample_accuracy"],
                 "walks_scored": cal["walks_scored"],
