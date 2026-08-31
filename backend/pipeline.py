@@ -2,12 +2,18 @@
 분석 파이프라인 — 논문 [그림 1.1] 흐름도 구현 + 개선사항.
 
   주가 데이터 -> GAF(GADF+GASF 2채널) 인코딩 -> VAE 잠재변수 추출
+    -> (+ 기술적 지표 특징 결합: 조병호 2021 엔진 설계)
     -> 로지스틱/SVM/랜덤포레스트 앙상블 -> 익일 상승확률
-    -> 임계값 보정 + 표본 외 백테스트 + gs-quant 분석
+    -> 롤링 임계값 보정 + 표본 외 백테스트 + gs-quant 분석
     -> 예상 주가(1/5/20일) + 시기(Walk-forward) 분석
 
-개선사항: 시드 고정(재현성), 모델 디스크 캐시(같은 기준일 재학습 생략),
-GADF+GASF 2채널, 보정 임계값, 다중 시계 예상주가, 백테스트.
+검증 위생 (수정사항):
+  · VAE 는 walk-forward 검증 구간을 제외한 앞부분으로만 학습한다.
+    (전 구간 학습은 특징 추출기가 미래 이미지를 본 상태가 되어
+     '표본 외' 정의가 깨진다)
+  · 임계값은 직전 walk 들만으로 정하고 다음 walk 에 적용한다.
+  · 화면 대표 정확도는 임계값 0.5 고정 기준과 롤링 보정 기준 두 가지를
+    표본 수·신뢰구간과 함께 보고한다.
 """
 import base64
 import io
@@ -33,6 +39,10 @@ from . import gaf, indicators, models, quant, vae
 WINDOW = 20          # 논문: 20일 촛대 차트 기간
 LATENT_DIM = 15      # 논문: 잠재 변수 15
 EPOCHS = 25
+N_WALKS = 6
+TEST_DAYS = 21
+MIN_VAE_FIT = 200    # 검증 구간 제외 후 최소 학습 표본
+CACHE_VER = 2        # 학습 방식 변경 시 캐시 무효화
 CACHE_DIR = pathlib.Path(__file__).resolve().parent.parent / "models_cache"
 
 _lock = threading.Lock()
@@ -74,14 +84,30 @@ def _cache_paths(ticker: str):
     return base.with_suffix(".pt"), base.with_suffix(".joblib")
 
 
-def _load_cached_model(ticker, as_of, n_channels):
-    """같은 기준일의 학습 모델이 있으면 로드 (개선사항: 재학습 생략)."""
+def vae_fit_end(n_labeled: int, n_walks: int = N_WALKS,
+                test_days: int = TEST_DAYS) -> tuple:
+    """
+    VAE 학습에 쓸 표본 끝 인덱스 (수정사항).
+
+    walk-forward 검증 구간(마지막 n_walks*test_days 일)을 제외한다.
+    제외하고 나면 표본이 너무 적은 종목은 전체를 쓰되 leak_free=False 로
+    표시해 검증 결과가 낙관 편향임을 남긴다.
+    """
+    end = n_labeled - n_walks * test_days
+    if end < MIN_VAE_FIT:
+        return n_labeled, False
+    return end, True
+
+
+def _load_cached_model(ticker, as_of, n_channels, fit_end):
+    """같은 기준일·같은 학습 구간의 모델이 있으면 로드 (재학습 생략)."""
     pt, jb = _cache_paths(ticker)
     if not (pt.exists() and jb.exists()):
         return None
     try:
         meta = joblib.load(jb)
-        if meta.get("as_of") != as_of:
+        if (meta.get("as_of") != as_of or meta.get("ver") != CACHE_VER
+                or meta.get("fit_end") != fit_end):
             return None
         model = vae.ConvVAE(img=meta["img"], latent_dim=LATENT_DIM,
                             channels=n_channels)
@@ -92,20 +118,39 @@ def _load_cached_model(ticker, as_of, n_channels):
         return None
 
 
-def _save_model(ticker, model, as_of, img):
+def _save_model(ticker, model, as_of, img, fit_end):
     pt, jb = _cache_paths(ticker)
     try:
         torch.save(model.state_dict(), pt)
-        joblib.dump({"as_of": as_of, "img": img}, jb)
+        joblib.dump({"as_of": as_of, "img": img, "fit_end": fit_end,
+                     "ver": CACHE_VER}, jb)
     except OSError:
         pass
 
 
-def multi_horizon(close, p_up, threshold=0.5):
+def build_features(model, X, df, dates) -> np.ndarray:
+    """
+    VAE 잠재변수 + 기술적 지표 특징 결합 (논문 엔진 설계 반영).
+
+    조병호(2021)의 엔진은 '여러 기술적 분석 기법의 결과를 ML 입력으로
+    결합'하는 것이 핵심이다. 지표는 모두 t 시점까지만 사용하는 인과적
+    계산이라 미래 정보가 섞이지 않는다.
+    """
+    Z = vae.extract_latents(model, X)
+    feats = quant.feature_matrix(df, WINDOW).reindex(dates)
+    F = feats.to_numpy(dtype=float)
+    F = np.nan_to_num(F, nan=0.0, posinf=0.0, neginf=0.0)
+    return np.hstack([Z, F]), list(feats.columns)
+
+
+def multi_horizon(close, p_up):
     """
     다중 시계 예상 주가 (개선사항).
+
     1일: 모형 확률 기반 기대수익률.  5/20일: 1일 모형 시각 + 이후 과거
     평균 드리프트, 밴드는 ±1σ·√h 로 확장.
+    ⚠️ h>1 구간은 대부분 과거 드리프트의 외삽이며 모형 신호가 아니다
+    (model_driven 플래그로 구분해 화면에 표시).
     """
     rets = close.pct_change().dropna()
     up_m = float(rets[rets >= 0].mean()) if (rets >= 0).any() else 0.0
@@ -121,7 +166,8 @@ def multi_horizon(close, p_up, threshold=0.5):
         out.append({"horizon": h, "expected_price": last * (1 + r),
                     "expected_return_pct": r * 100,
                     "band_low": last * (1 + r - band),
-                    "band_high": last * (1 + r + band)})
+                    "band_high": last * (1 + r + band),
+                    "model_driven": h == 1})
     return out
 
 
@@ -139,31 +185,38 @@ def run_analysis(ticker: str, period: str = "5y"):
         Xl, yl = X[labeled], y[labeled]
         dl = [d for d, m in zip(dates, labeled) if m]
 
-        model = _load_cached_model(ticker, as_of, X.shape[1])
+        # 수정사항 ②: VAE 는 검증 구간을 제외한 앞부분으로만 학습
+        fit_end, leak_free = vae_fit_end(len(Xl))
+        X_fit = Xl[:fit_end]
+
+        model = _load_cached_model(ticker, as_of, X.shape[1], fit_end)
         if model is None:
             _set(ticker, status="training", progress=0.10,
-                 message=f"VAE 학습 중… (이미지 {len(Xl):,}장 × {X.shape[1]}채널)")
+                 message=f"VAE 학습 중… (검증 구간 제외 {len(X_fit):,}장 "
+                         f"× {X.shape[1]}채널)")
 
             def prog(ep, total, loss):
                 _set(ticker, progress=0.10 + 0.5 * ep / total,
                      message=f"VAE 학습 중… epoch {ep}/{total} (loss {loss:.1f})")
 
-            model = vae.train_vae(Xl, epochs=EPOCHS, latent_dim=LATENT_DIM,
+            model = vae.train_vae(X_fit, epochs=EPOCHS, latent_dim=LATENT_DIM,
                                   progress=prog)
-            _save_model(ticker, model, as_of, X.shape[-1])
+            _save_model(ticker, model, as_of, X.shape[-1], fit_end)
         else:
             _set(ticker, status="training", progress=0.55,
-                 message="캐시된 모델 로드 (동일 기준일 — 재학습 생략)")
+                 message="캐시된 모델 로드 (동일 기준일·동일 학습 구간)")
 
-        _set(ticker, progress=0.62, message="잠재 변수 추출 중…")
-        Z_all = vae.extract_latents(model, X)
+        _set(ticker, progress=0.62, message="잠재 변수 + 기술적 지표 결합 중…")
+        Z_all, feat_names = build_features(model, X, df, dates)
         Zl = Z_all[labeled]
 
-        _set(ticker, progress=0.70, message="Walk-forward 검증 중… (6 walks)")
-        wf = models.walk_forward(Zl, yl, dl, n_walks=6, test_days=21)
+        _set(ticker, progress=0.70,
+             message=f"Walk-forward 검증 중… ({N_WALKS} walks)")
+        wf = models.walk_forward(Zl, yl, dl, n_walks=N_WALKS,
+                                 test_days=TEST_DAYS)
 
-        # 개선사항: 표본 외 예측으로 결정 임계값 보정 + 백테스트
-        cal = bt.calibrate_threshold(wf["per_day"])
+        # 수정사항 ①: 임계값은 직전 walk 들로만 결정 → 다음 walk 에 적용
+        cal = bt.rolling_calibration(wf["per_day"])
         closes_by_date = {str(i.date()): float(v)
                           for i, v in df["Close"].items()}
         backtest = bt.run_backtest(wf["per_day"], closes_by_date)
@@ -189,7 +242,7 @@ def run_analysis(ticker: str, period: str = "5y"):
         tech = indicators.analyze(df, p_up)
         p_final = tech["p_combined"]
         exp = quant.expected_price(close, p_final)
-        horizons = multi_horizon(close, p_final, threshold)
+        horizons = multi_horizon(close, p_final)
         overlays = quant.series_for_chart(close, WINDOW)
 
         tail = df.tail(180)
@@ -205,7 +258,7 @@ def run_analysis(ticker: str, period: str = "5y"):
 
         # 신뢰 구간: |p - threshold| 가 작으면 '중립' (개선사항)
         conf = abs(p_final - threshold)
-        direction = ("중립" if conf < 0.03
+        direction = ("중립" if conf < bt.NEUTRAL_BAND
                      else "상승" if p_final >= threshold else "하락")
 
         result = {
@@ -220,11 +273,30 @@ def run_analysis(ticker: str, period: str = "5y"):
                 "p_model": p_up,
                 "direction": direction,
                 "threshold": threshold,
-                "calibrated_acc": cal["accuracy"],
+                "calibrated_acc": cal["accuracy"],      # 롤링(누수 없음)
+                "calibrated_stats": cal["stats"],
+                "fixed_acc": cal["fixed"]["accuracy"],  # 임계값 0.5 고정
+                "fixed_stats": cal["fixed"],
+                "insample_acc": cal["insample_accuracy"],  # 편향값(참고용)
                 "confidence": conf,
+                "neutral_band": bt.NEUTRAL_BAND,
                 "per_model": {k2: float(v[0]) for k2, v in probs_last.items()},
                 "horizons": horizons,
                 **exp,
+            },
+            "validation": {
+                "pooled": wf["pooled"],
+                "rolling": cal["stats"],
+                "insample_accuracy": cal["insample_accuracy"],
+                "walks_scored": cal["walks_scored"],
+                "vae_leak_free": bool(leak_free),
+                "vae_fit_end": str(dl[fit_end - 1].date()) if fit_end else None,
+                "n_latent": LATENT_DIM,
+                "n_features": len(feat_names),
+                "n_input_dims": LATENT_DIM + len(feat_names),
+                "feature_names": feat_names,
+                "label_eps_bp": gaf.LABEL_EPS * 10000.0,
+                "signals_in_sample": True,
             },
             "indicators": ind,
             "tech": tech,

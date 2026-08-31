@@ -99,3 +99,102 @@ def expected_price(close: pd.Series, p_up: float) -> dict:
         "up_day_mean_pct": up_mean * 100.0,
         "down_day_mean_pct": dn_mean * 100.0,
     }
+
+
+# ---------------------------------------------------------------------------
+# 기술적 지표 특징 행렬 (논문 설계 반영)
+#
+# 조병호(2021) 「인공지능 머신러닝 기술을 이용한 주식 종목 매수/매도 추천
+# 시스템의 분석 및 설계」의 엔진 설계는 '여러 기술적 분석 기법의 결과값을
+# 머신러닝 입력으로 결합'하는 것이 핵심이다(단일 기법 평균 56.7% vs 결합
+# 78.3% 주장). 기존 구현은 아래 지표들을 화면 표시에만 썼고 분류기 입력은
+# VAE 잠재변수뿐이었다. 이 함수는 지표들을 학습 가능한 특징으로 만들어
+# 잠재변수와 결합할 수 있게 한다.
+#
+# 모든 특징은 t 시점까지의 데이터만 사용하는 인과적(causal) 롤링 계산이며,
+# 수준(level)이 아니라 비율/정규화 값이라 시계열 간 비교가 가능하다.
+# ---------------------------------------------------------------------------
+
+FEATURE_NAMES = [
+    "ret_1d", "ret_5d", "ret_20d", "ma20_gap", "ma60_gap", "rsi_14",
+    "macd_norm", "bb_pctb", "vol_20d", "volume_ratio", "range_14", "mom_60d",
+]
+
+
+def _align(series, index) -> pd.Series:
+    """gs-quant 반환 시계열을 원본 인덱스에 맞춰 정렬."""
+    s = pd.Series(series)
+    try:
+        s = s.reindex(index)
+    except Exception:
+        s = pd.Series(np.asarray(s, dtype=float), index=index[-len(s):]).reindex(index)
+    return s.astype(float)
+
+
+def feature_matrix(df: pd.DataFrame, window: int = 20) -> pd.DataFrame:
+    """
+    일봉 DataFrame -> 기술적 지표 특징 행렬 (인덱스는 df 와 동일).
+
+    gs-quant timeseries 함수를 우선 사용하고, 실패 시 동등한 pandas 계산으로
+    대체한다. 선행 구간의 NaN 은 0(중립)으로 채운다.
+    """
+    close = df["Close"].astype(float)
+    idx = df.index
+    f = pd.DataFrame(index=idx)
+
+    f["ret_1d"] = close.pct_change(1)
+    f["ret_5d"] = close.pct_change(5)
+    f["ret_20d"] = close.pct_change(20)
+
+    try:
+        ma20 = _align(ts.moving_average(close, ts.Window(window, 0)), idx)
+        ma60 = _align(ts.moving_average(close, ts.Window(60, 0)), idx)
+    except Exception:
+        ma20 = close.rolling(window).mean()
+        ma60 = close.rolling(60).mean()
+    f["ma20_gap"] = close / ma20 - 1.0
+    f["ma60_gap"] = close / ma60 - 1.0
+
+    try:
+        rsi = _align(ts.relative_strength_index(close, 14), idx)
+    except Exception:
+        d = close.diff()
+        up = d.clip(lower=0).rolling(14).mean()
+        dn = (-d.clip(upper=0)).rolling(14).mean()
+        rsi = 100 - 100 / (1 + up / dn.replace(0, np.nan))
+    f["rsi_14"] = rsi / 100.0 - 0.5
+
+    try:
+        macd = _align(ts.macd(close, 12, 26), idx)
+    except Exception:
+        macd = close.ewm(span=12).mean() - close.ewm(span=26).mean()
+    f["macd_norm"] = macd / close
+
+    try:
+        bb = ts.bollinger_bands(close, ts.Window(window, 0), 2)
+        lo, hi = _align(bb.iloc[:, 0], idx), _align(bb.iloc[:, 1], idx)
+    except Exception:
+        sd = close.rolling(window).std()
+        lo, hi = ma20 - 2 * sd, ma20 + 2 * sd
+    f["bb_pctb"] = (close - lo) / (hi - lo) - 0.5
+
+    try:
+        f["vol_20d"] = _align(ts.volatility(close, ts.Window(window, 0)), idx) / 100.0
+    except Exception:
+        f["vol_20d"] = close.pct_change().rolling(window).std() * math.sqrt(252)
+
+    if "Volume" in df.columns:
+        vol = df["Volume"].astype(float)
+        f["volume_ratio"] = vol / vol.rolling(window).mean() - 1.0
+    else:
+        f["volume_ratio"] = 0.0
+
+    if {"High", "Low"} <= set(df.columns):
+        f["range_14"] = ((df["High"] - df["Low"]) / close).rolling(14).mean()
+    else:
+        f["range_14"] = 0.0
+
+    f["mom_60d"] = close / close.shift(60) - 1.0
+
+    f = f[FEATURE_NAMES].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    return f.astype(float)

@@ -132,6 +132,7 @@ tr.click:hover td{background:#1c2129}
         <div class="dir" id="pDir">—</div>
         <div class="p" id="pProb">—</div>
         <div class="p" id="pThr"></div>
+        <div class="p" id="pVal" style="font-size:11.5px"></div>
       </div>
     </div>
     <div class="kv">
@@ -144,6 +145,7 @@ tr.click:hover td{background:#1c2129}
 
     <h2 style="margin-top:14px">다중 시계 예상 주가</h2>
     <table id="horizonTable"></table>
+    <div class="note" id="horizonNote"></div>
 
     <h2 style="margin-top:14px">보조지표 구간 신호 — 역사적 익일 상승률</h2>
     <table id="techTable"></table>
@@ -187,7 +189,7 @@ tr.click:hover td{background:#1c2129}
       <div style="flex:1.4; min-width:420px">
         <h2>Walk-forward 검증 — 기간별 모형 성능 (시기 분석)</h2>
         <table id="wfTable"></table>
-        <div class="note">각 Walk 은 해당 시점 이전 전체 데이터로 학습 후 다음 1개월(≈21거래일)을 검증. 논문 3.4.4절 방식.</div>
+        <div class="note" id="wfNote">각 Walk 은 해당 시점 이전 전체 데이터로 학습 후 다음 1개월(≈21거래일)을 검증. 논문 3.4.4절 방식.</div>
       </div>
       <div style="flex:1; min-width:340px">
         <h2>Walk 별 앙상블 정확도</h2>
@@ -196,6 +198,18 @@ tr.click:hover td{background:#1c2129}
         <table id="hitTable"></table>
       </div>
     </div>
+  </div>
+
+  <div class="panel full">
+    <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap">
+      <h2 style="margin:0; flex:0 0 auto">특징 구성 A/B 비교 — 잠재변수 vs 지표 vs 결합</h2>
+      <button id="btnAb">비교 실행</button>
+      <span class="pmsg" id="abMsg">같은 walk · 같은 VAE · 같은 라벨에서 분류기 입력만 바꿔 비교합니다. (VAE 캐시 재사용, 약 10~30초)</span>
+    </div>
+    <div class="pbar" style="margin-top:10px"><div id="abBar"></div></div>
+    <table id="abTable" style="margin-top:12px"></table>
+    <table id="abPairs" style="margin-top:12px"></table>
+    <div class="note" id="abNote"></div>
   </div>
 </div>
 </div>
@@ -213,7 +227,7 @@ tr.click:hover td{background:#1c2129}
   <div class="panel">
     <h2>정확도 순위 <span id="scanCount" style="float:right"></span></h2>
     <table id="scanTable"></table>
-    <div class="note">행 클릭 시 해당 종목의 정밀 분석(5년, 25 epochs)으로 이동. 정확도: Walk-forward 앙상블 평균(표본 외).</div>
+    <div class="note" id="scanNote">행 클릭 시 해당 종목의 정밀 분석(5년, 25 epochs)으로 이동. 정확도: Walk-forward 표본 외 예측을 전 구간 합산(임계값 0.5 고정).</div>
   </div>
 </div>
 
@@ -308,7 +322,16 @@ function render(){
   $('pDir').style.color = P.direction==='중립' ? 'var(--muted)' : (P.p_up>=P.threshold ? 'var(--up)' : 'var(--down)');
   $('pProb').textContent = `상승 확률 ${(P.p_up*100).toFixed(1)}%`
     + (P.p_model!=null && Math.abs(P.p_model-P.p_up)>1e-6 ? ` (모형 ${(P.p_model*100).toFixed(1)}% + 보조지표 보정)` : '');
-  $('pThr').textContent = `보정 임계값 ${P.threshold.toFixed(2)} (검증 정확도 ${(P.calibrated_acc*100).toFixed(1)}%)`;
+  const V=R.validation||{};
+  const pct=v=>(v==null||isNaN(v))?'—':(v*100).toFixed(1)+'%';
+  const ciTxt=st=>(st&&st.ci_low!=null)?`95% CI ${pct(st.ci_low)}~${pct(st.ci_high)}, n=${st.n}`:'표본 부족';
+  const cs=P.calibrated_stats, fs=P.fixed_stats;
+  $('pThr').textContent = `임계값 ${P.threshold.toFixed(2)} · 표본 외 정확도 ${pct(P.calibrated_acc)} (${ciTxt(cs)})`;
+  const base = fs&&fs.baseline!=null ? fs.baseline : 0.5;
+  const sig = fs && fs.p_value!=null ? (fs.significant?'기준선 초과, 유의(p<0.05)':`기준선과 구분 불가 (p=${fs.p_value.toFixed(2)})`) : '';
+  $('pVal').innerHTML = `임계값 0.5 고정 ${pct(P.fixed_acc)} vs 기준선(다수 클래스) ${pct(base)} · ${sig}`
+    + (V.vae_leak_free===false?' · <span style="color:var(--down)">⚠ 표본 부족: VAE가 검증구간 포함 학습</span>':'');
+  $('pVal').style.color = (fs&&fs.significant)?'var(--green)':'var(--muted)';
   $('vLast').textContent = fmt(P.last_close);
   $('vExp').textContent = fmt(P.expected_price);
   $('vRet').textContent = (P.expected_return_pct>=0?'+':'')+fmt(P.expected_return_pct)+'%';
@@ -334,10 +357,13 @@ function render(){
   ];
   $('indGrid').innerHTML = rows.map(([k,v])=>`<div class="cell"><div class="k">${k}</div><div class="v" style="font-size:13px">${v}</div></div>`).join('');
   $('gafImg').src = 'data:image/png;base64,'+R.gaf_png;
-  $('sigNote').textContent = `확률 ≥ ${(P.threshold+0.03).toFixed(2)} 매수 신호(▲), ≤ ${(P.threshold-0.03).toFixed(2)} 매도 신호(▼). 회색 밴드는 중립 구간.`;
+  const nb=P.neutral_band!=null?P.neutral_band:0.03;
+  $('sigNote').textContent = `확률 ≥ ${(P.threshold+nb).toFixed(2)} 매수 신호(▲), ≤ ${(P.threshold-nb).toFixed(2)} 매도 신호(▼). 회색 밴드는 중립 구간.`
+    + ' 이 타임라인은 전체 데이터로 학습한 모형의 표본 내 확률이며, 성능 평가는 아래 Walk-forward 표를 볼 것.';
+  $('horizonNote').textContent = '1일 예상가만 모형 확률에 기반한다. 5·20일은 과거 252일 평균 드리프트를 외삽한 값으로 모형 신호가 아니다.';
   renderTech();
 
-  drawChart(); drawSignals(); drawTech(); renderCombo(); drawComboStrip(); renderWF(); drawBacktest(); refreshQuote();
+  drawChart(); drawSignals(); drawTech(); renderCombo(); drawComboStrip(); renderWF(); drawBacktest(); refreshQuote(); pollAb();
 }
 
 // ---------- 보조지표 신호 테이블 + 서브차트 ----------
@@ -516,7 +542,8 @@ function setupCanvas(cv){
 function drawChart(){
   const cv=$('chart'); const [ctx,W,H]=setupCanvas(cv);
   const C=R.candles, P=R.prediction;
-  const buyT=P.threshold+0.03, sellT=P.threshold-0.03;
+  const nb=(P.neutral_band!=null?P.neutral_band:0.03);
+  const buyT=P.threshold+nb, sellT=P.threshold-nb;
   const padL=8, padR=64, padT=10, padB=22;
   const n=C.length, extra=4;
   const lows=C.map(d=>d.l), highs=C.map(d=>d.h);
@@ -582,7 +609,8 @@ function drawChart(){
 function drawSignals(){
   const cv=$('signalChart'); const [ctx,W,H]=setupCanvas(cv);
   const S=R.signals, P=R.prediction, padL=8, padR=64, padT=8, padB=16;
-  const buyT=P.threshold+0.03, sellT=P.threshold-0.03;
+  const nb=(P.neutral_band!=null?P.neutral_band:0.03);
+  const buyT=P.threshold+nb, sellT=P.threshold-nb;
   const X=i=>padL+(W-padL-padR)*(i/(S.length-1)), Y=p=>padT+(H-padT-padB)*(1-p);
   ctx.clearRect(0,0,W,H);
   ctx.fillStyle='rgba(139,148,158,.12)';
@@ -650,9 +678,22 @@ function renderWF(){
       <td>${w.ensemble.f1.toFixed(3)}</td><td>${isNaN(w.ensemble.auc)?'—':w.ensemble.auc.toFixed(3)}</td></tr>`;
   });
   const a=wf.average.ensemble;
+  const pc=v=>(v==null||isNaN(v))?'—':(v*100).toFixed(1)+'%';
+  const n3=v=>(v==null||isNaN(v))?'—':Number(v).toFixed(3);
   html+=`<tr style="background:#0d1117"><td colspan="5"><b>평균 (앙상블)</b></td>
-    <td><b style="color:var(--gold)">${(a.accuracy*100).toFixed(1)}%</b></td>
-    <td><b>${a.f1.toFixed(3)}</b></td><td><b>${isNaN(a.auc)?'—':a.auc.toFixed(3)}</b></td></tr>`;
+    <td><b style="color:var(--gold)">${pc(a.accuracy)}</b></td>
+    <td><b>${n3(a.f1)}</b></td><td><b>${n3(a.auc)}</b></td></tr>`;
+  const po=wf.pooled, V=R.validation||{};
+  if(po){
+    html+=`<tr style="background:#0d1117"><td colspan="5"><b>전 구간 합산 (임계값 0.5)</b></td>
+      <td><b style="color:${po.significant?'var(--green)':'var(--muted)'}">${pc(po.accuracy)}</b></td>
+      <td colspan="2" style="color:var(--muted)">95% CI ${pc(po.ci_low)}~${pc(po.ci_high)} · n=${po.n} · 기준선 ${pc(po.baseline)} · p=${n3(po.p_value)}</td></tr>`;
+  }
+  if(V.rolling){
+    html+=`<tr><td colspan="5">롤링 보정 임계값 기준 (직전 walk 로만 결정)</td>
+      <td><b>${pc(V.rolling.accuracy)}</b></td>
+      <td colspan="2" style="color:var(--muted)">n=${V.rolling.n} · 기준선 ${pc(V.rolling.baseline)} · 참고: 전 구간에서 임계값을 탐색하면 ${pc(V.insample_accuracy)} (편향된 값)</td></tr>`;
+  }
   $('wfTable').innerHTML=html;
 
   const cv=$('wfChart'); const [ctx,W,H]=setupCanvas(cv);
@@ -672,15 +713,74 @@ function renderWF(){
   });
 
   const pd=wf.per_day.slice(-10).reverse();
-  let ht=`<tr><th>날짜</th><th>예측확률</th><th>예측</th><th>실제</th><th>적중</th></tr>`;
+  let ht=`<tr><th>날짜</th><th>예측확률</th><th>임계값</th><th>예측</th><th>실제</th><th>적중</th></tr>`;
   pd.forEach(d=>{
-    const pr=d.prob>=0.5;
+    const th=(d.threshold!=null?d.threshold:0.5);
+    const pr=d.prob>=th;
+    const hit=(d.hit_cal!=null?d.hit_cal:d.hit);
     ht+=`<tr><td>${d.date}</td><td>${(d.prob*100).toFixed(1)}%</td>
+      <td>${th.toFixed(2)}</td>
       <td><span class="tag ${pr?'up':'down'}">${pr?'상승':'하락'}</span></td>
       <td><span class="tag ${d.actual?'up':'down'}">${d.actual?'상승':'하락'}</span></td>
-      <td class="${d.hit?'hitgood':'hitbad'}">${d.hit?'✓':'✗'}</td></tr>`;
+      <td class="${hit?'hitgood':'hitbad'}">${hit?'✓':'✗'}</td></tr>`;
   });
   $('hitTable').innerHTML=ht;
+}
+
+// ---------- 특징 구성 A/B 비교 (ablation) ----------
+let abTimer=null;
+$('btnAb').onclick=async()=>{
+  $('abMsg').textContent='시작 중…';
+  await fetch(`/api/ablation/start?ticker=${currentTicker}`,{method:'POST'});
+  pollAb();
+};
+async function pollAb(){
+  clearTimeout(abTimer);
+  let st;
+  try{ st=await (await fetch(`/api/ablation/status?ticker=${currentTicker}`)).json(); }catch(e){ return; }
+  if(st.status==='idle'){ $('abTable').innerHTML=''; $('abPairs').innerHTML=''; $('abNote').textContent=''; $('abBar').style.width='0%'; return; }
+  $('abBar').style.width=((st.progress||0)*100)+'%';
+  if(st.message) $('abMsg').textContent=st.message;
+  if(st.status==='running'){ abTimer=setTimeout(pollAb,1500); return; }
+  if(st.status==='error'){ $('abMsg').textContent=st.message; return; }
+  if(st.status==='done' && st.has_result){
+    try{ renderAb(await (await fetch(`/api/ablation/result?ticker=${currentTicker}`)).json()); }catch(e){}
+  }
+}
+function renderAb(A){
+  const pc=v=>(v==null||isNaN(v))?'—':(v*100).toFixed(1)+'%';
+  const n3=v=>(v==null||isNaN(v))?'—':Number(v).toFixed(3);
+  let h=`<tr><th>분류기 입력</th><th>차원</th><th>표본 외 정확도</th><th>기준선</th><th>95% CI</th><th>AUC</th><th>F1</th><th>p(기준선 대비)</th></tr>`;
+  A.variants.forEach(v=>{
+    const win = v.key===A.best;
+    h+=`<tr${win?' style="background:#0d1117"':''}>
+      <td>${win?'★ ':''}${v.label}</td><td>${v.dims}</td>
+      <td><b style="color:${v.significant?'var(--green)':(win?'var(--gold)':'var(--text)')}">${pc(v.accuracy)}</b></td>
+      <td style="color:var(--muted)">${pc(v.baseline)}</td>
+      <td style="color:var(--muted)">${pc(v.ci_low)}~${pc(v.ci_high)}</td>
+      <td>${n3(v.auc)}</td><td>${n3(v.f1)}</td>
+      <td style="color:${v.significant?'var(--green)':'var(--muted)'}">${n3(v.p_value)}</td></tr>`;
+  });
+  $('abTable').innerHTML=h;
+
+  const nm={latent:'잠재변수', indicator:'지표', combined:'결합'};
+  let hp=`<tr><th>비교 (같은 날짜, 짝지은 표본)</th><th>A만 적중</th><th>B만 적중</th><th>불일치</th><th>χ²</th><th>p</th><th>판정</th></tr>`;
+  A.pairs.forEach(p=>{
+    hp+=`<tr><td>${nm[p.a]||p.a} <span style="color:var(--muted)">vs</span> ${nm[p.b]||p.b} <span style="color:var(--muted)">(n=${p.n})</span></td>
+      <td>${p.a_only}일</td><td>${p.b_only}일</td><td>${p.discordant}일</td>
+      <td>${n3(p.chi2)}</td><td style="color:${p.significant?'var(--green)':'var(--muted)'}">${n3(p.p_value)}</td>
+      <td><span class="tag ${p.significant?'up':'flat'}">${p.verdict.replace('latent',nm.latent).replace('indicator',nm.indicator).replace('combined',nm.combined)}</span></td></tr>`;
+  });
+  $('abPairs').innerHTML=hp;
+
+  const anySig = A.variants.some(v=>v.significant) || A.pairs.some(p=>p.significant);
+  $('abNote').innerHTML =
+    `${A.ticker} · 기준일 ${A.as_of} · VAE 학습 종료 ${A.vae_fit_end}(검증 구간 제외) · 라벨 임계 ${A.label_eps_bp.toFixed(0)}bp · `+
+    `${A.n_walks} walks × ${A.test_days}일 · ${A.elapsed_sec}초<br>`+
+    `정확도 차이는 표본 ${A.variants[0]?A.variants[0].n:0}일 기준 ±8%p 수준의 노이즈를 포함한다. `+
+    `세 구성이 같은 날짜를 예측하므로 우열은 위 McNemar(짝지은 표본) 판정으로 볼 것. `+
+    (anySig ? '<b style="color:var(--green)">유의한 차이가 관측됐다.</b>'
+            : '<b>현재 표본에서는 세 구성 모두 기준선과, 서로와 구분되지 않는다.</b>');
 }
 
 // ---------- NASDAQ-100 스캔 ----------
@@ -704,14 +804,32 @@ function renderScan(st){
   const ok=st.results.filter(r=>!r.error), err=st.results.filter(r=>r.error);
   $('scanCount').textContent = ok.length? `${ok.length}종목 · 실패 ${err.length}`:'';
   if(!ok.length){ $('scanTable').innerHTML='<tr><td class="note">아직 결과가 없습니다. 스캔을 시작하세요.</td></tr>'; return; }
-  let html=`<tr><th>#</th><th>티커</th><th>WF 정확도</th><th>보정 정확도</th><th>F1</th><th>AUC</th><th>예측</th><th>상승확률</th><th>현재가</th><th>예상가(익일)</th><th>수익률</th></tr>`;
+  const pc=v=>(v==null||isNaN(v))?'—':(v*100).toFixed(1)+'%';
+  const n3=v=>(v==null||isNaN(v))?'—':Number(v).toFixed(3);
+  const sigN=ok.filter(r=>r.significant).length;
+  // 다중비교: 100종목을 63일 표본으로 줄세우면 상위권은 우연일 수 있다.
+  const nSamp=ok.length? (ok[0].n||63):63;
+  const mBase=ok.length? ok.reduce((a,r)=>a+(r.baseline||0.5),0)/ok.length : 0.5;
+  const se=Math.sqrt(mBase*(1-mBase)/nSamp);
+  const expMax=mBase+2.6*se;   // 기준선만 찍는 모형이라도 N종목 중 최댓값은 여기까지
+  $('scanNote').innerHTML =
+    `행 클릭 시 정밀 분석(5년, 25 epochs)으로 이동. 정확도 = Walk-forward 표본 외 예측 전 구간 합산(임계값 0.5 고정).<br>`+
+    `종목당 표본 ${nSamp}일 → 표준오차 ${(se*100).toFixed(1)}%p. 기준선(다수 클래스, 평균 ${pc(mBase)})만 찍어도 ${ok.length}종목 중 최고치는 `+
+    `약 ${(expMax*100).toFixed(1)}% 까지 나온다. <b>관측 최고 ${pc(ok.length?Math.max(...ok.map(r=>r.accuracy||0)):null)}</b> · `+
+    `p&lt;0.05 종목 ${sigN}개 (무작위여도 약 ${Math.round(ok.length*0.05)}개는 나온다). 순위 상위라는 사실만으로 우위를 뜻하지 않는다.`;
+  let html=`<tr><th>#</th><th>티커</th><th>WF 정확도</th><th>기준선</th><th>95% CI</th><th>표본</th><th>p</th><th>롤링 보정</th><th>AUC</th><th>예측</th><th>상승확률</th><th>현재가</th><th>예상가(익일)</th><th>수익률</th></tr>`;
   ok.forEach((r,i)=>{
+    const col = r.significant ? 'var(--green)' : 'var(--muted)';
     html+=`<tr class="click" onclick="gotoTicker('${r.ticker}')">
-      <td>${i+1}</td><td><b>${r.ticker}</b></td>
-      <td><b style="color:${r.accuracy>=0.5?'var(--green)':'var(--up)'}">${(r.accuracy*100).toFixed(1)}%</b></td>
-      <td>${(r.calibrated_acc*100).toFixed(1)}%</td>
-      <td>${r.f1.toFixed(3)}</td><td>${isNaN(r.auc)?'—':r.auc.toFixed(3)}</td>
-      <td><span class="tag ${r.direction==='상승'?'up':'down'}">${r.direction}</span></td>
+      <td>${i+1}</td><td><b>${r.ticker}</b>${r.leak_free===false?' <span style="color:var(--down)" title="표본 부족: VAE가 검증구간 포함 학습">⚠</span>':''}</td>
+      <td><b style="color:${col}">${pc(r.accuracy)}</b></td>
+      <td style="color:var(--muted)">${pc(r.baseline)}</td>
+      <td style="color:var(--muted)">${pc(r.ci_low)}~${pc(r.ci_high)}</td>
+      <td>${r.n!=null?r.n:'—'}</td>
+      <td style="color:${col}">${n3(r.p_value)}</td>
+      <td>${pc(r.rolling_acc)}</td>
+      <td>${n3(r.auc)}</td>
+      <td><span class="tag ${r.direction==='상승'?'up':(r.direction==='하락'?'down':'flat')}">${r.direction}</span></td>
       <td>${(r.p_up*100).toFixed(1)}%</td>
       <td>${fmt(r.last_close)}</td><td style="color:var(--gold)">${fmt(r.expected_price)}</td>
       <td style="color:${r.expected_return_pct>=0?'var(--up)':'var(--down)'}">${(r.expected_return_pct>=0?'+':'')+fmt(r.expected_return_pct)}%</td></tr>`;

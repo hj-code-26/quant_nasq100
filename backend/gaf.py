@@ -10,6 +10,11 @@ GAF (Gramian Angular Field) 인코딩 — 논문 3.2.2절 구현.
 """
 import numpy as np
 
+# 라벨 임계 수익률: 왕복 거래비용(편도 5bp) 이상 움직인 날만 '상승'으로 본다.
+# 논문/기존 구현은 c[t+1] >= c[t] 를 상승으로 세어 거래비용에도 못 미치는
+# 미세 변동을 신호로 학습했다.
+LABEL_EPS = 0.0010
+
 
 def _rescale(x: np.ndarray) -> np.ndarray:
     """식 (3.1): [-1, 1] 구간으로 표준화."""
@@ -56,15 +61,18 @@ def ohlc_gaf_image(open_, high, low, close, dual: bool = True) -> np.ndarray:
     return np.stack(ch)
 
 
-def build_dataset(df, window: int = 20, dual: bool = True):
+def build_dataset(df, window: int = 20, dual: bool = True,
+                  label_eps: float = LABEL_EPS):
     """
     슬라이딩 윈도우(=1일 이동, 논문 3.1절)로 GAF 이미지 데이터셋 생성.
 
     df: Open/High/Low/Close 컬럼을 가진 DataFrame (일봉)
-    반환: X (M, C, 2W, 2W), y (M,)  — y=1 이면 익일 종가 상승(>=), 0 하락,
-          dates: 각 윈도우의 마지막 거래일 (예측 기준일)
-    윈도우 마지막 날 t 에 대해 라벨은 C_{t+1} >= C_t.
+    반환: X (M, C, 2W, 2W), y (M,)  — y=1 이면 익일 수익률 > label_eps,
+          0 이면 그 이하.  dates: 각 윈도우의 마지막 거래일 (예측 기준일)
+    윈도우 마지막 날 t 에 대해 라벨은 C_{t+1}/C_t - 1 > label_eps.
     마지막 윈도우(라벨 없음)는 y=-1 로 반환하여 실시간 예측에 사용.
+
+    label_eps: 거래비용 임계 (기본 10bp). 0 으로 주면 논문의 단순 등락 라벨.
     """
     o = df["Open"].to_numpy(float)
     h = df["High"].to_numpy(float)
@@ -77,7 +85,7 @@ def build_dataset(df, window: int = 20, dual: bool = True):
         X.append(ohlc_gaf_image(o[s:t + 1], h[s:t + 1], l[s:t + 1],
                                 c[s:t + 1], dual=dual))
         if t + 1 < n:
-            y.append(1 if c[t + 1] >= c[t] else 0)
+            y.append(1 if (c[t + 1] / c[t] - 1.0) > label_eps else 0)
         else:
             y.append(-1)
         dates.append(df.index[t])

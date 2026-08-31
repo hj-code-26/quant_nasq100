@@ -77,7 +77,10 @@ def run_diagnostics() -> list:
     # 0) 코드 컴파일
     def c_compile():
         bad = []
-        for f in PATCHABLE + ["server.py", "ai_auditor.py"]:
+        # ablation.py 는 컴파일 검사만 하고 AI 자동 패치 대상에서는 제외한다
+        # (성능 비교를 수행하는 코드까지 자동 수정되면 검증의 의미가 없다)
+        for f in PATCHABLE + ["server.py", "ai_auditor.py", "ablation.py",
+                              "indicators.py", "toss.py"]:
             try:
                 py_compile.compile(str(ROOT / f), doraise=True)
             except py_compile.PyCompileError as e:
@@ -152,6 +155,47 @@ def run_diagnostics() -> list:
         return (band_ok and rsi_ok,
                 f"밴드순서={band_ok}, RSI범위={rsi_ok}({rsi:.1f})")
     add("gs-quant·예상주가", c_quant)
+
+    # 6) 검증 위생 — 누수 방지 불변식
+    def c_leak():
+        from . import backtest as bt_
+        from . import pipeline as pl
+        # (a) VAE 학습 구간이 walk-forward 검증 구간을 침범하지 않는가
+        n_lab, nw, td = 800, 6, 21
+        end, lf = pl.vae_fit_end(n_lab, nw, td)
+        a_ok = bool(lf) and end == n_lab - nw * td
+        # (b) 임계값이 '직전 walk 들'로만 결정되는가
+        rng = np.random.default_rng(3)
+        rows = [{"date": f"d{i}", "walk": i // 10 + 1,
+                 "prob": float(rng.uniform(0.3, 0.7)),
+                 "actual": int(rng.integers(0, 2))} for i in range(40)]
+        cal = bt_.rolling_calibration(rows)
+        b_ok = all(abs(r["threshold"] - 0.5) < 1e-9
+                   for r in rows if r["walk"] == 1)
+        exp_t, _ = bt_._search_threshold([r for r in rows if r["walk"] <= 2])
+        c_ok = all(abs(r["threshold"] - exp_t) < 1e-9
+                   for r in rows if r["walk"] == 3)
+        # (c) 첫 walk 은 채점에서 제외
+        d_ok = cal["n_eval"] == 30 and cal["walks_scored"] == 3
+        ok = a_ok and b_ok and c_ok and d_ok
+        return (ok, f"VAE 구간분리={a_ok}, 첫walk=0.5 {b_ok}, "
+                    f"과거전용 임계={c_ok}, 채점표본={cal['n_eval']}")
+    add("검증 위생(누수 방지)", c_leak)
+
+    # 7) 특징 인과성 — 미래 봉을 바꿔도 과거 특징이 변하면 안 된다
+    def c_causal():
+        from . import quant
+        F1 = quant.feature_matrix(df)
+        d2 = df.copy()
+        d2.iloc[-5:] = d2.iloc[-5:] * 1.25
+        F2 = quant.feature_matrix(d2)
+        k = len(df) - 5
+        same = bool(np.allclose(F1.to_numpy()[:k], F2.to_numpy()[:k],
+                                atol=1e-10))
+        n_feat = int(F1.shape[1])
+        return (same and n_feat >= 8,
+                f"과거 특징 불변={same}, 특징 수={n_feat}")
+    add("특징 인과성", c_causal)
 
     return checks
 

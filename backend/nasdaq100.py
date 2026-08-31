@@ -14,7 +14,7 @@ import numpy as np
 
 from . import backtest as bt
 from . import data as data_mod
-from . import gaf, models, vae
+from . import gaf, models, pipeline, vae
 
 # NASDAQ-100 구성 종목 (2026 기준 근사 — 편입/편출 시 수정)
 TICKERS = [
@@ -35,7 +35,10 @@ TICKERS = [
 _STATE = {"status": "idle", "done": 0, "total": 0, "current": "",
           "results": [], "started_at": None, "stop": False}
 _lock = threading.Lock()
-CACHE = pathlib.Path(__file__).resolve().parent.parent / "models_cache" / "scan_results.json"
+# v2: VAE 누수 제거 + 지표 결합 + 롤링 임계값으로 산출 방식이 바뀌어
+# 이전 결과와 비교 불가하므로 캐시 파일을 분리한다.
+CACHE = (pathlib.Path(__file__).resolve().parent.parent / "models_cache"
+         / "scan_results_v2.json")
 
 
 def get_state():
@@ -73,7 +76,14 @@ def load_cached():
 
 
 def scan_one(ticker: str, period="2y", epochs=8, n_walks=3) -> dict:
-    """단일 종목 고속 분석 → 정확도/예측 요약."""
+    """
+    단일 종목 고속 분석 → 정확도/예측 요약.
+
+    정확도는 표본이 작아(3 walks × 21일 = 63일) 표준오차가 6%p 수준이다.
+    100 종목을 이 값으로 줄세우면 상위권은 실력이 아니라 다중비교로 뽑힌
+    노이즈일 수 있으므로, 표본 수·95% 신뢰구간·동전던지기 대비 p-value 를
+    함께 반환해 화면에서 같이 보여준다 (수정사항 ③).
+    """
     df = data_mod.history(ticker, period)
     if len(df) < 150:
         raise ValueError("데이터 부족")
@@ -81,32 +91,48 @@ def scan_one(ticker: str, period="2y", epochs=8, n_walks=3) -> dict:
     labeled = y >= 0
     Xl, yl = X[labeled], y[labeled]
     dl = [d for d, m in zip(dates, labeled) if m]
-    model = vae.train_vae(Xl, epochs=epochs, latent_dim=15)
-    Z_all = vae.extract_latents(model, X)
+    # 검증 구간을 제외하고 VAE 학습 (수정사항 ②)
+    fit_end, leak_free = pipeline.vae_fit_end(len(Xl), n_walks, 21)
+    model = vae.train_vae(Xl[:fit_end], epochs=epochs, latent_dim=15)
+    # 잠재변수 + 기술적 지표 결합 (수정사항 ④)
+    Z_all, feat_names = pipeline.build_features(model, X, df, dates)
     Zl = Z_all[labeled]
     wf = models.walk_forward(Zl, yl, dl, n_walks=n_walks, test_days=21)
     bundle = models.fit_classifiers(Zl, yl)
     p_up = float(models.predict_proba(bundle, Z_all[-1:])["ensemble"][0])
-    cal = bt.calibrate_threshold(wf["per_day"])
+    cal = bt.rolling_calibration(wf["per_day"])
+    pooled = wf["pooled"]
     avg = wf["average"]["ensemble"]
     last = float(df["Close"].iloc[-1])
     rets = df["Close"].pct_change().dropna()
     up_m = float(rets[rets >= 0].mean()) if (rets >= 0).any() else 0.0
     dn_m = float(rets[rets < 0].mean()) if (rets < 0).any() else 0.0
     exp_ret = p_up * up_m + (1 - p_up) * dn_m
+    conf = abs(p_up - cal["threshold"])
     return {
         "ticker": ticker,
-        "accuracy": avg.get("accuracy", float("nan")),
+        "accuracy": pooled["accuracy"],          # 임계값 0.5 고정, 전 구간 합산
+        "baseline": pooled["baseline"],          # 다수 클래스만 찍었을 때
+        "n": pooled["n"],
+        "ci_low": pooled["ci_low"],
+        "ci_high": pooled["ci_high"],
+        "p_value": pooled["p_value"],
+        "significant": pooled["significant"],
+        "rolling_acc": cal["accuracy"],          # 롤링 보정 임계값 기준
+        "rolling_n": cal["n_eval"],
+        "insample_acc": cal["insample_accuracy"],  # 편향값(참고용)
         "f1": avg.get("f1", float("nan")),
         "auc": avg.get("auc", float("nan")),
-        "calibrated_acc": cal["accuracy"],
         "threshold": cal["threshold"],
         "p_up": p_up,
-        "direction": "상승" if p_up >= cal["threshold"] else "하락",
+        "direction": ("중립" if conf < bt.NEUTRAL_BAND
+                      else "상승" if p_up >= cal["threshold"] else "하락"),
+        "leak_free": bool(leak_free),
         "last_close": last,
         "expected_price": last * (1 + exp_ret),
         "expected_return_pct": exp_ret * 100,
         "as_of": str(df.index[-1].date()),
+        "ver": 2,
     }
 
 
