@@ -5,6 +5,7 @@ scikit-learn
 numpy
 pandas
 yfinance
+requests
 gs-quant
 matplotlib
 anthropic

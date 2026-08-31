@@ -175,7 +175,7 @@ def _ask_ai(client, failed, checks):
     sources = []
     for f in PATCHABLE:
         try:
-            sources.append(f"### {f}\n```python\n{(ROOT / f).read_text()}\n```")
+            sources.append(f"### {f}\n```python\n{(ROOT / f).read_text(encoding='utf-8')}\n```")
         except OSError:
             pass
     report = json.dumps(checks, ensure_ascii=False, indent=1)
@@ -215,14 +215,14 @@ def _apply_patches(patches) -> list:
             _log(f"거부(화이트리스트 외): {f}")
             continue
         path = ROOT / f
-        src = path.read_text()
+        src = path.read_text(encoding="utf-8")
         find = p.get("find", "")
         if not find or src.count(find) != 1:
             _log(f"거부(find 불일치 {src.count(find)}회): {f}")
             continue
         bak = path.with_suffix(".py.bak")
         shutil.copy2(path, bak)
-        path.write_text(src.replace(find, p.get("replace", "")))
+        path.write_text(src.replace(find, p.get("replace", "")), encoding="utf-8")
         try:
             py_compile.compile(str(path), doraise=True)
             applied.append({"file": f, "backup": str(bak)})

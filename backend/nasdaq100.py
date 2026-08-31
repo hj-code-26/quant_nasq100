@@ -55,7 +55,7 @@ def _append(row):
     with _lock:
         _STATE["results"].append(row)
         try:
-            CACHE.write_text(json.dumps(_STATE["results"], ensure_ascii=False))
+            CACHE.write_text(json.dumps(_STATE["results"], ensure_ascii=False), encoding="utf-8")
         except OSError:
             pass
 
@@ -65,10 +65,10 @@ def load_cached():
         try:
             with _lock:
                 if not _STATE["results"]:
-                    _STATE["results"] = json.loads(CACHE.read_text())
+                    _STATE["results"] = json.loads(CACHE.read_text(encoding="utf-8"))
                     _STATE["status"] = "done" if _STATE["results"] else "idle"
                     _STATE["done"] = _STATE["total"] = len(_STATE["results"])
-        except (OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
             pass
 
 

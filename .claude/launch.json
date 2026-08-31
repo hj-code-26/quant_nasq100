@@ -3,7 +3,7 @@
   "configurations": [
     {
       "name": "quant",
-      "runtimeExecutable": "python3",
+      "runtimeExecutable": "python",
       "runtimeArgs": ["run.py"],
       "port": 8899
     }

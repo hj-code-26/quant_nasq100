@@ -1,0 +1,10 @@
+services:
+  quant:
+    build: .
+    ports:
+      - "8899:8899"
+    volumes:
+      - ./models_cache:/app/models_cache   # 학습 모델 캐시 유지 (재시작 시 재학습 생략)
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}   # AI 코드 감사용 (선택)
+    restart: unless-stopped

@@ -15,3 +15,6 @@ models_cache/scan_results.json
 
 # macOS
 .DS_Store
+
+# 비밀키
+.env

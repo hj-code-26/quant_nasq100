@@ -28,7 +28,7 @@ import matplotlib.pyplot as plt
 
 from . import backtest as bt
 from . import data as data_mod
-from . import gaf, models, quant, vae
+from . import gaf, indicators, models, quant, vae
 
 WINDOW = 20          # 논문: 20일 촛대 차트 기간
 LATENT_DIM = 15      # 논문: 잠재 변수 15
@@ -182,11 +182,14 @@ def run_analysis(ticker: str, period: str = "5y"):
             for i in range(k)
         ]
 
-        _set(ticker, progress=0.93, message="gs-quant 지표 계산 중…")
+        _set(ticker, progress=0.93, message="gs-quant·보조지표 분석 중…")
         close = df["Close"]
         ind = quant.analytics(close, WINDOW)
-        exp = quant.expected_price(close, p_up)
-        horizons = multi_horizon(close, p_up, threshold)
+        # 보조지표 구간별 역사적 상승확률 분석 → 모형 확률과 블렌딩해 예측에 반영
+        tech = indicators.analyze(df, p_up)
+        p_final = tech["p_combined"]
+        exp = quant.expected_price(close, p_final)
+        horizons = multi_horizon(close, p_final, threshold)
         overlays = quant.series_for_chart(close, WINDOW)
 
         tail = df.tail(180)
@@ -201,9 +204,9 @@ def run_analysis(ticker: str, period: str = "5y"):
             ov[name] = [None if (v != v) else float(v) for v in s.to_numpy(float)]
 
         # 신뢰 구간: |p - threshold| 가 작으면 '중립' (개선사항)
-        conf = abs(p_up - threshold)
+        conf = abs(p_final - threshold)
         direction = ("중립" if conf < 0.03
-                     else "상승" if p_up >= threshold else "하락")
+                     else "상승" if p_final >= threshold else "하락")
 
         result = {
             "ticker": ticker,
@@ -213,7 +216,8 @@ def run_analysis(ticker: str, period: str = "5y"):
             "latent_dim": LATENT_DIM,
             "channels": int(X.shape[1]),
             "prediction": {
-                "p_up": p_up,
+                "p_up": p_final,
+                "p_model": p_up,
                 "direction": direction,
                 "threshold": threshold,
                 "calibrated_acc": cal["accuracy"],
@@ -223,6 +227,9 @@ def run_analysis(ticker: str, period: str = "5y"):
                 **exp,
             },
             "indicators": ind,
+            "tech": tech,
+            "tech_series": indicators.chart_series(df, len(tail)),
+            "combo": indicators.combo_analysis(df, len(tail)),
             "walk_forward": wf,
             "backtest": backtest,
             "signals": signal_series,
