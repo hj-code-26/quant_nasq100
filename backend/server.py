@@ -194,6 +194,45 @@ def api_trade_execute(ticker: str = "AAPL", live: bool = False,
         raise HTTPException(502, f"{e.code}: {e}")
 
 
+# ---------- 스캔 → 계획 (포트폴리오) ----------
+
+@app.post("/api/trade/portfolio")
+def api_portfolio_start(top: int = 5, force: bool = False,
+                        strict: bool = True):
+    """스캔 상위 종목으로 계획 산출 시작(비동기)."""
+    return JSONResponse(_json_safe(trader.start_portfolio(top, force, strict)))
+
+
+@app.get("/api/trade/portfolio")
+def api_portfolio():
+    return JSONResponse(_json_safe(trader.get_portfolio_state()))
+
+
+@app.post("/api/trade/portfolio/execute")
+def api_portfolio_execute(live: bool = False, confirm: str = ""):
+    """포트폴리오 체결. live=True 면 confirm 에 정확히 EXECUTE 를 보내야 한다."""
+    st = trader.get_portfolio_state()
+    if st["status"] != "done":
+        raise HTTPException(409, "계획을 먼저 산출하세요")
+    tradable = [p for p in st["plans"] if p.get("tradable")]
+    if not tradable:
+        raise HTTPException(422, "거래 자격 있는 종목이 없습니다 — 주문하지 않습니다.")
+    if live and confirm.strip().upper() != "EXECUTE":
+        raise HTTPException(400, "실주문 확인 실패: confirm=EXECUTE 필요")
+    try:
+        return JSONResponse(_json_safe(
+            {"tickers": [p["ticker"] for p in tradable],
+             "executed": trader.execute_portfolio(live=live)}))
+    except TossError as e:
+        raise HTTPException(502, f"{e.code}: {e}")
+
+
+@app.get("/api/trade/plans")
+def api_trade_plans(min_acc: float = trader.MIN_SCAN_ACC):
+    """산출한 계획을 기준일별로 정리 (스캔 롤링 보정 정확도 min_acc 이상만)."""
+    return JSONResponse(_json_safe(trader.plans_by_date(min_acc)))
+
+
 @app.get("/api/trade/journal")
 def api_trade_journal():
     """거래 일지 (dry-run 포함)."""

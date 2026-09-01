@@ -18,7 +18,9 @@ horizon > 1 의 두 가지 함정을 모두 처리한다:
      대략 n/h 이므로 유의성 검정에서 표본 수를 그만큼 깎는다(effective_n).
 
 사용:
-  python -m backend.trader AAPL            # 계획만 출력 (주문 안 나감, 기본)
+  python -m backend.trader --scan          # 스캔 상위 종목 → 계획 → 체결(dry-run)
+  python -m backend.trader --scan --top=3 --loose --live
+  python -m backend.trader AAPL            # 단일 종목 계획만 출력 (기본)
   python -m backend.trader AAPL --live     # 실제 주문 실행
   python -m backend.trader --report        # 거래 일지 + 현재가로 손익 확인
 """
@@ -32,9 +34,12 @@ from scipy import stats
 
 from . import backtest as bt
 from . import data as data_mod
+from . import nasdaq100
 from .toss import TossClient
 
 P_MAX = 0.05            # 이항검정 단측 p-value 상한 (거래 자격 게이트)
+MIN_HOLDOUT_TRADES = 3  # 홀드아웃 승률을 믿으려면 최소 이만큼은 매매했어야
+MIN_SCAN_ACC = 0.60     # 스캔 롤링 보정 정확도 하한 — 이 밑은 계획에 편성하지 않는다
 
 # 트랙 정의: 라벨 전망 기간, 예산 비중, 점검 주기, walk 수.
 #
@@ -49,6 +54,9 @@ TRACKS = {
               "review": "월 1회", "walks": 24},   # 504일 검증 → 유효 ~24개
 }
 JOURNAL = pathlib.Path(__file__).with_name("trade_journal.jsonl")
+# 산출한 계획의 요약 기록 — 기준일별로 다시 묶어 보기 위한 것. 계획 본문은
+# 메모리에만 있고 서버를 내리면 사라지므로, 목록에 필요한 값만 여기 남긴다.
+PLAN_LOG = pathlib.Path(__file__).with_name("plan_history.jsonl")
 
 # 계획 산출은 VAE 2회 학습 + 36 walks 라 수 분 걸린다. HTTP 를 막지 않도록
 # 백그라운드 스레드로 돌리고 상태만 폴링한다.
@@ -91,8 +99,10 @@ def start_plan(ticker: str, force: bool = False) -> dict:
                 "ticker": ticker, "date": str(df.index[-1].date()),
                 "last_close": float(df["Close"].iloc[-1]),
                 "tradable": any(v["tradable"] for v in legs.values()),
+                "win_rate_pct": plan_win_rate(legs),
                 "tracks": legs,
             }
+            log_plan(plan)
             _set_plan(ticker, status="done", progress=1.0, message="완료",
                       plan=plan)
         except Exception as e:  # noqa: BLE001
@@ -103,6 +113,54 @@ def start_plan(ticker: str, force: bool = False) -> dict:
     threading.Thread(target=run, daemon=True).start()
     time.sleep(0.05)
     return get_plan_state(ticker)
+
+
+def scan_row(ticker: str) -> dict:
+    """스캔 결과에서 해당 종목 행. 스캔 전이면 빈 dict."""
+    return next((r for r in nasdaq100.get_state()["results"]
+                 if r.get("ticker") == ticker.upper()), {})
+
+
+def log_plan(plan: dict):
+    """계획 요약을 기준일과 함께 기록."""
+    s = scan_row(plan["ticker"])
+    row = {"date": plan["date"], "ticker": plan["ticker"], "ts": time.time(),
+           "last_close": plan["last_close"], "tradable": plan["tradable"],
+           "win_rate_pct": plan.get("win_rate_pct"),
+           "rolling_acc": s.get("rolling_acc"), "scan_as_of": s.get("as_of"),
+           "actions": {k: v["action"] for k, v in plan["tracks"].items()}}
+    with PLAN_LOG.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def plans_by_date(min_acc: float = MIN_SCAN_ACC) -> dict:
+    """산출한 계획을 기준일별로 정리. 스캔 정확도 min_acc 미만은 제외.
+
+    같은 날 같은 종목을 여러 번 돌렸으면 마지막 산출만 남긴다.
+    """
+    if not PLAN_LOG.exists():
+        return {"min_acc": min_acc, "dates": [], "excluded": 0}
+    rows = [json.loads(l) for l in
+            PLAN_LOG.read_text(encoding="utf-8").splitlines() if l.strip()]
+    latest = {}
+    for r in sorted(rows, key=lambda r: r.get("ts", 0)):
+        latest[(r["date"], r["ticker"])] = r
+    keep, drop = [], 0
+    for r in latest.values():
+        if (r.get("rolling_acc") or 0) >= min_acc:
+            keep.append(r)
+        else:
+            drop += 1
+    by = {}
+    for r in keep:
+        by.setdefault(r["date"], []).append(r)
+    return {
+        "min_acc": min_acc, "excluded": drop,
+        "dates": [{"date": d,
+                   "plans": sorted(by[d], key=lambda r: r.get("win_rate_pct") or 0,
+                                   reverse=True)}
+                  for d in sorted(by, reverse=True)],
+    }
 
 
 def effective_n(n: int, horizon: int) -> int:
@@ -130,8 +188,45 @@ def edge_test(per_day, horizon: int = 1):
             "horizon": horizon}
 
 
+def split_by_walk(per_day, holdout_frac=0.34):
+    """walk 단위 시간순 분할 → (보정 구간, 홀드아웃 구간).
+
+    임계값 그리드 탐색은 128가지 조합을 같은 표본에서 훑기 때문에, 탐색에
+    쓴 구간의 승률·샤프는 반드시 부풀려진다. 그래서 뒤쪽 walk 들은 탐색에서
+    빼두고, 확정된 임계값으로 단 한 번만 채점한다.
+    """
+    walks = sorted({d.get("walk", 1) for d in per_day})
+    if len(walks) < 3:
+        return per_day, []
+    hold = set(walks[-max(1, round(len(walks) * holdout_frac)):])
+    return ([d for d in per_day if d.get("walk", 1) not in hold],
+            [d for d in per_day if d.get("walk", 1) in hold])
+
+
+def holdout_backtest(per_day, closes_by_date, holdout_frac=0.34):
+    """앞 구간에서 임계값을 고르고, 뒤 구간에서 그 임계값으로만 채점.
+
+    반환 stats 의 승률·수익률은 임계값 탐색에 한 번도 쓰이지 않은 구간의
+    값이라, 종목 간 줄세우기에 쓸 수 있는 유일한 수치다.
+    """
+    cal, hold = split_by_walk(per_day, holdout_frac)
+    th = calibrate_trade_thresholds(cal, closes_by_date)
+    r = bt.run_backtest(hold, closes_by_date, buy_th=th["buy_th"],
+                        sell_th=th["sell_th"]) if hold else None
+    st = dict(r["stats"]) if r else {"win_rate_pct": float("nan"), "trades": 0,
+                                     "strategy_return_pct": 0.0,
+                                     "buyhold_return_pct": 0.0, "sharpe": 0.0,
+                                     "mdd_pct": 0.0, "days": 0}
+    st["days_cal"] = len(cal)
+    return th, st
+
+
 def calibrate_trade_thresholds(per_day, closes_by_date, min_trades=2):
-    """표본 외 예측 위에서 (buy_th, sell_th) 그리드 탐색 — 샤프 최대."""
+    """표본 외 예측 위에서 (buy_th, sell_th) 그리드 탐색 — 샤프 최대.
+
+    주의: 이 함수가 돌려주는 sharpe/return 은 탐색에 쓴 바로 그 표본의
+    값이므로 낙관 편향이다. 종목 선별에는 holdout_backtest() 를 써라.
+    """
     best = None
     b = 0.50
     while b <= 0.65 + 1e-9:
@@ -172,13 +267,18 @@ def track_plan(ticker, track, df=None, period="5y", epochs=12):
     closes = {str(i.date()): float(v) for i, v in df["Close"].items()}
 
     edge = edge_test(wf["per_day"], horizon=h)
-    th = calibrate_trade_thresholds(wf["per_day"], closes)
+    th, hold = holdout_backtest(wf["per_day"], closes)
     p = float(models.predict_proba(models.fit_classifiers(Z[lab], y[lab]),
                                    Z[-1:])["ensemble"][0])
     last = float(df["Close"].iloc[-1])
     sma = float(df["Close"].rolling(20).mean().iloc[-1])
 
-    tradable = edge["significant"]
+    # 거래 자격 = 방향 예측이 우연과 구분되고(이항검정),
+    #             홀드아웃 구간에서 실제로 돈을 벌었을 것(승률·매매횟수).
+    hold_ok = (hold["trades"] >= MIN_HOLDOUT_TRADES
+               and hold["win_rate_pct"] > 50.0
+               and hold["strategy_return_pct"] > 0)
+    tradable = edge["significant"] and hold_ok
     if not tradable:
         action = "HOLD"
     elif p >= th["buy_th"] and last >= sma:      # 추세 필터: 두 트랙 공통
@@ -193,10 +293,13 @@ def track_plan(ticker, track, df=None, period="5y", epochs=12):
         "review": cfg["review"], "budget_frac": cfg["budget"],
         "action": action, "tradable": tradable,
         "p_up": round(p, 4), "edge": edge, "thresholds": th,
+        "holdout": hold, "win_rate_pct": hold["win_rate_pct"],
         "last_close": last, "sma20": sma,
         "hold_note": f"{h}거래일(≈{cfg['label']}) 보유 전제",
         "reason": (f"p={p:.3f} vs 매수≥{th['buy_th']}/매도≤{th['sell_th']}, "
-                   f"종가 {last:.2f} vs SMA20 {sma:.2f}"),
+                   f"종가 {last:.2f} vs SMA20 {sma:.2f}, "
+                   f"홀드아웃 승률 {hold['win_rate_pct']:.1f}% "
+                   f"({hold['trades']}회 매매)"),
     }
 
 
@@ -209,12 +312,25 @@ def make_plan(ticker, tracks=("week", "month")):
         "date": str(df.index[-1].date()),
         "last_close": float(df["Close"].iloc[-1]),
         "tradable": any(l["tradable"] for l in legs.values()),
+        "win_rate_pct": plan_win_rate(legs),
         "tracks": legs,
     }
 
 
-def execute(plan, live=False):
-    """계획 실행. live=False 면 계산만(dry-run)."""
+def plan_win_rate(legs) -> float:
+    """계획의 대표 승률 = 자격 있는 트랙 중 최고 홀드아웃 승률.
+
+    자격 있는 트랙이 없으면 어차피 주문하지 않으므로 참고용으로 전체 최고값.
+    """
+    ok = [l for l in legs.values() if l["tradable"]] or list(legs.values())
+    return max((l.get("win_rate_pct") or 0.0) for l in ok) if ok else 0.0
+
+
+def execute(plan, live=False, budget_scale=1.0):
+    """계획 실행. live=False 면 계산만(dry-run).
+
+    budget_scale: 여러 종목에 동시 진입할 때 종목당 예산 배분 비율(1/N).
+    """
     t = TossClient()
     results = []
     for name, leg in plan["tracks"].items():
@@ -224,8 +340,10 @@ def execute(plan, live=False):
                  "live": live, "ts": time.time()}
         if leg["action"] == "BUY" and leg["tradable"]:
             power = float(t.buying_power("USD")["cashBuyingPower"])
-            qty = int(power * leg["budget_frac"] / plan["last_close"])
-            entry.update(quantity=qty, limit_price=plan["last_close"])
+            qty = int(power * leg["budget_frac"] * budget_scale
+                      / plan["last_close"])
+            entry.update(quantity=qty, limit_price=plan["last_close"],
+                         budget_scale=budget_scale)
             if qty < 1:
                 entry["skipped"] = "예산 부족"
             elif live:
@@ -242,6 +360,137 @@ def execute(plan, live=False):
         with JOURNAL.open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     return results
+
+
+# ---------- 스캔 → 계획 → 체결 ----------
+#
+# 종목을 사람이 고르는 대신 스캔 결과에서 뽑는다. 스캔은 고속 모드(2년·3 walks)
+# 라 표본이 63개뿐이고 250종목 중 상위를 고르는 다중비교 편향이 있다. 그래서
+# 스캔은 '후보 선별'까지만 하고, 실제 거래 자격은 각 종목에서 다시 학습한
+# 주간/월간 트랙의 표본 외 이항검정(P_MAX)이 판정한다.
+_PORT = {"status": "idle", "progress": 0.0, "message": "",
+         "candidates": [], "plans": [], "error": None}
+_polock = threading.Lock()
+
+
+def scan_candidates(top: int = 5, strict: bool = True) -> list:
+    """스캔 결과 → 표본 외 백테스트 승률 상위 N.
+
+    1차 컷은 스캔의 롤링 보정 정확도 MIN_SCAN_ACC(60%) 이상.
+    (롤링 보정 = 그날 이전 walk 들로만 정한 임계값으로 채점한 값이라
+     임계값 탐색 편향이 없다. 스캔표의 'WF 정확도'는 임계값 0.5 고정값이다.)
+    통과한 종목들 사이의 순위는 '그 신호로 실제 매매했을 때의 승률'로 매긴다.
+    매매가 거의 없었던 종목은 승률이 우연 그 자체이므로 제외한다.
+
+    strict=True 면 방향 예측의 유의성(p<0.05)까지 요구한다. 250종목 중 이
+    조건을 넘는 건 한두 개뿐인 게 정상이다(우연 기대치와 같은 수준).
+    strict=False 는 그 필터를 빼는 '넓은 후보' 모드 — 어차피 주문 여부는
+    종목별 홀드아웃 백테스트와 본페로니 보정 검정이 다시 판정한다.
+    """
+    rows = nasdaq100.get_state()["results"]
+    cand = [r for r in rows
+            if r.get("direction") == "상승"
+            # 스캔 단계 1차 컷: 롤링 보정 정확도 60% 이상만 편성한다
+            and (r.get("rolling_acc") or 0) >= MIN_SCAN_ACC
+            # 다수 클래스만 찍는 것보다 못한 모델은 상승 신호도 의미가 없다
+            and r.get("accuracy", 0) >= r.get("baseline", 1)
+            and (r.get("bt_trades", 0) or 0) >= MIN_HOLDOUT_TRADES
+            and (r.get("significant") or not strict)]
+    cand.sort(key=lambda r: (r.get("win_rate_pct") or 0.0,
+                             r.get("accuracy", 0)), reverse=True)
+    return cand[:top]
+
+
+def get_portfolio_state() -> dict:
+    with _polock:
+        return dict(_PORT)
+
+
+def _set_port(**kw):
+    with _polock:
+        _PORT.update(kw)
+
+
+def start_portfolio(top: int = 5, force: bool = False,
+                    strict: bool = True) -> dict:
+    """스캔 상위 종목들에 대해 매매 계획을 순차 산출 (백그라운드)."""
+    st = get_portfolio_state()
+    if st["status"] == "running":
+        return st
+    if not force and st["status"] == "done":
+        return st
+    cand = scan_candidates(top, strict=strict)
+    if not cand:
+        _set_port(status="error", progress=1.0, plans=[], candidates=[],
+                  message="스캔 결과에 조건을 만족하는 종목이 없습니다"
+                          + (" (유의 + 상승). strict 를 끄거나" if strict
+                             else " (상승).")
+                          + " 먼저 스캔을 실행하세요.",
+                  error="no_candidates")
+        return get_portfolio_state()
+
+    def run():
+        plans = []
+        try:
+            for i, c in enumerate(cand):
+                _set_port(status="running", progress=i / len(cand),
+                          message=f"{c['ticker']} 계획 산출 중… "
+                                  f"({i + 1}/{len(cand)})", plans=list(plans))
+                try:
+                    plan = make_plan(c["ticker"])
+                    log_plan(plan)
+                    plans.append(plan | {"scan": c})
+                except Exception as e:  # noqa: BLE001
+                    plans.append({"ticker": c["ticker"], "error": str(e)[:120],
+                                  "tradable": False, "tracks": {}, "scan": c})
+            plans = rank_plans(plans)
+            ok = sum(1 for p in plans if p.get("tradable"))
+            _set_port(status="done", progress=1.0, plans=plans,
+                      message=f"{ok}/{len(plans)} 종목 거래 자격 있음"
+                              + (f" · 최고 홀드아웃 승률 "
+                                 f"{plans[0]['win_rate_pct']:.1f}%" if ok else ""))
+        except Exception as e:  # noqa: BLE001
+            _set_port(status="error", progress=1.0, plans=plans,
+                      message=f"오류: {e}", error=str(e))
+
+    _set_port(status="running", progress=0.01, plans=[], candidates=cand,
+              error=None, message="시작…")
+    threading.Thread(target=run, daemon=True).start()
+    time.sleep(0.05)
+    return get_portfolio_state()
+
+
+def rank_plans(plans: list) -> list:
+    """홀드아웃 승률 내림차순 정렬 + 다중비교 보정.
+
+    N개 후보를 훑어 그 중 최고를 고르면, 종목당 p<0.05 를 통과했다는 사실만으로는
+    부족하다(N=5면 하나라도 우연히 통과할 확률이 23%). 본페로니로 종목당 기준을
+    P_MAX/N 까지 조인다 — 후보를 넓게 볼수록 개별 종목의 증거 요구치가 올라간다.
+    """
+    n = max(1, len(plans))
+    for p in plans:
+        legs = list(p.get("tracks", {}).values())
+        for l in legs:
+            l["tradable"] = l["tradable"] and l["edge"]["p_value"] < P_MAX / n
+        if legs:
+            p["tradable"] = any(l["tradable"] for l in legs)
+            p["win_rate_pct"] = plan_win_rate(p["tracks"])
+        p["selection_p_max"] = P_MAX / n
+    return sorted(plans, key=lambda p: (p.get("tradable", False),
+                                        p.get("win_rate_pct") or 0.0),
+                  reverse=True)
+
+
+def execute_portfolio(live: bool = False) -> list:
+    """거래 자격 있는 계획만 체결. 예산은 종목 수로 균등 분할."""
+    plans = [p for p in get_portfolio_state()["plans"] if p.get("tradable")]
+    if not plans:
+        return []
+    scale = 1.0 / len(plans)
+    out = []
+    for p in plans:
+        out += execute(p, live=live, budget_scale=scale)
+    return out
 
 
 def report():
@@ -270,8 +519,38 @@ if __name__ == "__main__":
         print(report())
         sys.exit(0)
     sys.stdout.reconfigure(encoding="utf-8")
-    ticker = next((a for a in args if not a.startswith("-")), "AAPL")
     live = "--live" in args
+
+    if "--scan" in args:
+        top = int(next((a.split("=")[1] for a in args
+                        if a.startswith("--top=")), 5))
+        st = start_portfolio(top, force=True,
+                             strict="--loose" not in args)
+        while st["status"] == "running":
+            print(f"  {st['message']}")
+            time.sleep(5)
+            st = get_portfolio_state()
+        if st.get("error"):
+            print(st["message"])
+            sys.exit(1)
+        for p in st["plans"]:
+            if p.get("error"):
+                print(f"{p['ticker']}: 오류 {p['error']}")
+                continue
+            legs = " | ".join(
+                f"{l['label']} {l['action']}"
+                f"{'' if l['tradable'] else '(자격없음)'}"
+                for l in p["tracks"].values())
+            print(f"{p['ticker']:6s} ${p['last_close']:8.2f}  "
+                  f"홀드아웃 승률 {p.get('win_rate_pct', 0):5.1f}%  {legs}")
+        print()
+        print(st["message"])
+        for r in execute_portfolio(live=live):
+            print(("주문 실행: " if live else "dry-run: ")
+                  + json.dumps(r, ensure_ascii=False))
+        sys.exit(0)
+
+    ticker = next((a for a in args if not a.startswith("-")), "AAPL")
     plan = make_plan(ticker)
     print(f"\n{plan['ticker']}  기준일 {plan['date']}  종가 ${plan['last_close']:.2f}\n")
     for leg in plan["tracks"].values():

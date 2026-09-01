@@ -23,3 +23,4 @@ models_cache/scan_results*.json
 server.log
 models_cache/month_scan.json
 backend/trade_journal.jsonl
+backend/plan_history.jsonl

@@ -60,7 +60,7 @@ _lock = threading.Lock()
 # v2: VAE 누수 제거 + 지표 결합 + 롤링 임계값으로 산출 방식이 바뀌어
 # 이전 결과와 비교 불가하므로 캐시 파일을 분리한다.
 CACHE = (pathlib.Path(__file__).resolve().parent.parent / "models_cache"
-         / "scan_results_v2.json")
+         / "scan_results_v3.json")   # v3: 표본 외 백테스트 승률 추가
 
 
 def get_state():
@@ -130,6 +130,12 @@ def scan_one(ticker: str, period="2y", epochs=8, n_walks=3,
     bundle = models.fit_classifiers(Zl, yl)
     p_up = float(models.predict_proba(bundle, Z_all[-1:])["ensemble"][0])
     cal = bt.rolling_calibration(wf["per_day"])
+    # 롤링 보정 임계값(그날 이전 walk 들로만 결정)으로 표본 외 매매를 흉내낸다.
+    # 임계값을 이 표본에서 탐색하지 않으므로 승률에 탐색 편향이 없다 —
+    # 다만 3 walks(63일)뿐이라 매매 횟수가 적어 승률 자체의 오차는 크다.
+    btr = bt.run_backtest(wf["per_day"],
+                          {str(i.date()): float(v) for i, v in df["Close"].items()})
+    bs = btr["stats"] if btr else {}
     pooled = wf["pooled"]
     avg = wf["average"]["ensemble"]
     last = float(df["Close"].iloc[-1])
@@ -163,7 +169,13 @@ def scan_one(ticker: str, period="2y", epochs=8, n_walks=3,
         "expected_price": last * (1 + exp_ret),
         "expected_return_pct": exp_ret * 100,
         "as_of": str(df.index[-1].date()),
-        "ver": 2,
+        # 표본 외 백테스트 (롤링 임계값) — 후보 선별의 1차 기준
+        "win_rate_pct": bs.get("win_rate_pct", float("nan")),
+        "bt_return_pct": bs.get("strategy_return_pct", float("nan")),
+        "bt_buyhold_pct": bs.get("buyhold_return_pct", float("nan")),
+        "bt_trades": bs.get("trades", 0),
+        "bt_sharpe": bs.get("sharpe", float("nan")),
+        "ver": 3,
     }
 
 
