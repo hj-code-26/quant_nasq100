@@ -6,7 +6,8 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from . import ai_auditor
 from . import data as data_mod
-from . import nasdaq100, pipeline
+from . import nasdaq100, pipeline, trader
+from .toss import TossClient, TossError
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 app = FastAPI(title="GAF-VAE Quant", version="2.0")
@@ -71,6 +72,100 @@ def api_audit_start(auto_fix: bool = True):
 @app.get("/api/audit/status")
 def api_audit_status():
     return JSONResponse(ai_auditor.get_state())
+
+
+@app.get("/api/scan/stats")
+def api_scan_stats():
+    """스캔 결과의 통계적 유의성 (우연 대비)."""
+    return JSONResponse(nasdaq100.scan_stats())
+
+
+# ---------- 토스증권 계좌 (읽기 전용) ----------
+
+def _toss():
+    try:
+        return TossClient()
+    except KeyError as e:
+        raise HTTPException(503, f"환경변수 미설정: {e}. .env 를 확인하세요")
+
+
+def _toss_call(fn):
+    try:
+        return JSONResponse(fn(_toss()))
+    except TossError as e:
+        raise HTTPException(e.status if e.status < 500 else 502,
+                            f"{e.code}: {e}")
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, str(e))
+
+
+@app.get("/api/toss/summary")
+def api_toss_summary():
+    """계좌 + 보유자산 + 매수가능금액을 한 번에."""
+    def go(t):
+        out = {"accounts": t.accounts(), "account_seq": t.account_seq}
+        if t.account_seq:
+            out["holdings"] = t.holdings()
+            out["buying_power"] = {c: t.buying_power(c) for c in ("USD", "KRW")}
+            out["commissions"] = t.commissions()
+        return out
+    return _toss_call(go)
+
+
+@app.get("/api/toss/orders")
+def api_toss_orders(status: str = "OPEN"):
+    return _toss_call(lambda t: t.orders(status=status))
+
+
+@app.post("/api/toss/orders/{order_id}/cancel")
+def api_toss_cancel(order_id: str):
+    return _toss_call(lambda t: t.cancel_order(order_id))
+
+
+# ---------- 매매 계획 ----------
+
+@app.post("/api/trade/plan")
+def api_trade_plan_start(ticker: str = "AAPL", force: bool = False):
+    """계획 산출 시작(비동기). 상태는 GET /api/trade/plan 으로 폴링."""
+    return JSONResponse(trader.start_plan(ticker, force))
+
+
+@app.get("/api/trade/plan")
+def api_trade_plan(ticker: str = "AAPL"):
+    """계획 산출 상태 + 완료 시 계획."""
+    return JSONResponse(trader.get_plan_state(ticker))
+
+
+@app.post("/api/trade/execute")
+def api_trade_execute(ticker: str = "AAPL", live: bool = False,
+                      confirm: str = ""):
+    """계획 실행. live=True 는 실계좌 주문 — confirm 에 티커를 정확히 보내야 한다."""
+    st = trader.get_plan_state(ticker)
+    plan = st.get("plan")
+    if st.get("status") != "done" or not plan:
+        raise HTTPException(409, "계획을 먼저 산출하세요")
+    if live:
+        if confirm.strip().upper() != ticker.strip().upper():
+            raise HTTPException(400, "실주문 확인 실패: confirm 값이 티커와 다릅니다")
+        if not plan["tradable"]:
+            raise HTTPException(422,
+                "표본 외 예측이 우연과 구분되지 않습니다 (통계적 유의성 없음). "
+                "실주문을 거부합니다.")
+    try:
+        return JSONResponse({"plan": plan, "executed": trader.execute(plan, live=live)})
+    except TossError as e:
+        raise HTTPException(502, f"{e.code}: {e}")
+
+
+@app.get("/api/trade/journal")
+def api_trade_journal():
+    """거래 일지 (dry-run 포함)."""
+    if not trader.JOURNAL.exists():
+        return JSONResponse([])
+    import json as _json
+    rows = [_json.loads(l) for l in
+            trader.JOURNAL.read_text(encoding="utf-8").splitlines() if l.strip()]
+    return JSONResponse(rows[-200:])
 
 
 def _strip(st: dict) -> dict:

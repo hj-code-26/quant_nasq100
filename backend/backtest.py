@@ -11,8 +11,15 @@ import math
 import numpy as np
 
 
+# 편도 거래비용(bp). 토스증권 실계좌 조회값 기준 — 미국 주식 수수료 0.100% = 10bp.
+# (GET /api/v1/commissions, 2026-09 확인). 왕복이면 20bp 가 든다.
+# 스프레드·환전은 미반영이라 이 값도 낙관적이다.
+# 국내(KR) 종목을 넣으려면 매도 거래세(약 18bp)를 별도로 더해야 한다.
+US_COST_BP = 10.0
+
+
 def run_backtest(per_day, closes_by_date, buy_th=0.55, sell_th=0.45,
-                 cost_bp=5.0):
+                 cost_bp=US_COST_BP):
     """
     per_day: walk_forward()의 per_day (표본 외 예측: date, prob)
     closes_by_date: {date(str): close}

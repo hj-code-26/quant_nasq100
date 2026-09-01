@@ -13,12 +13,29 @@
     t.sell("AAPL", quantity="1")                  # 시장가 매도
 """
 import os
+import pathlib
+import sys
 import time
 import uuid
 
 import requests
 
 BASE = "https://openapi.tossinvest.com"
+
+
+def _load_dotenv(path=pathlib.Path(__file__).resolve().parent.parent / ".env"):
+    """의존성 없이 .env 를 os.environ 에 주입. 이미 있는 값은 덮어쓰지 않는다."""
+    if not path.exists():
+        return
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        os.environ.setdefault(k.strip(), v.strip().strip("\"'"))
+
+
+_load_dotenv()
 
 
 class TossError(RuntimeError):
@@ -101,6 +118,9 @@ class TossClient:
     def buying_power(self, currency="USD"):
         return self._call("GET", "/api/v1/buying-power", params={"currency": currency}, account=True)
 
+    def commissions(self):
+        return self._call("GET", "/api/v1/commissions", account=True)
+
     def sellable_quantity(self, symbol):
         return self._call("GET", "/api/v1/sellable-quantity", params={"symbol": symbol}, account=True)
 
@@ -149,6 +169,7 @@ class TossClient:
 
 if __name__ == "__main__":
     # 읽기 전용 연결 점검 — 주문은 내지 않습니다.
+    sys.stdout.reconfigure(encoding="utf-8")  # 윈도우 콘솔 한글 깨짐 방지
     t = TossClient()
     print("계좌:", t.accounts())
     print("AAPL 현재가:", t.prices("AAPL"))

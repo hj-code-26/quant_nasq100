@@ -18,3 +18,8 @@ models_cache/scan_results.json
 
 # 비밀키
 .env
+
+# 런타임 산출물 (재생성 가능)
+server.log
+models_cache/month_scan.json
+backend/trade_journal.jsonl

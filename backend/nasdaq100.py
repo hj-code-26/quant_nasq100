@@ -1,5 +1,5 @@
 """
-NASDAQ-100 전체 스캔 — 구성 종목 전체에 GAF·VAE 파이프라인(고속 모드)을
+나스닥 유니버스 전체 스캔 (250종목) — 구성 종목 전체에 GAF·VAE 파이프라인(고속 모드)을
 적용해 Walk-forward 표본 외 정확도 순으로 정렬한다.
 
 고속 모드: 2년 데이터, VAE 8 epochs, 3 walks — 종목당 수 초.
@@ -16,7 +16,8 @@ from . import backtest as bt
 from . import data as data_mod
 from . import gaf, models, vae
 
-# NASDAQ-100 구성 종목 (2026 기준 근사 — 편입/편출 시 수정)
+# 스캔 유니버스 (250종목) — NASDAQ-100 구성 종목 + 나스닥 상장 유동성 상위 종목.
+# 확장분은 6개월 일봉 존재 여부로 생존 확인 후 일평균 거래대금순 선정 (2026-08 기준).
 TICKERS = [
     "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "GOOG", "META", "AVGO", "TSLA",
     "COST", "NFLX", "AMD", "PEP", "ADBE", "CSCO", "QCOM", "TMUS", "INTU",
@@ -30,6 +31,27 @@ TICKERS = [
     "WBD", "DLTR", "ARM", "CEG", "TEAM", "PDD", "MELI", "CDW", "GFS",
     "BKR", "LULU", "SMCI", "APP", "PLTR", "AXON", "LIN", "DASH", "TRI",
     "MSTR", "SHOP",
+]
+
+# --- 확장분 (149종목) ---
+TICKERS += [
+    "LITE", "WDC", "STX", "HOOD", "COIN", "TER", "SOFI", "MPWR", "CVNA",
+    "MDB", "AKAM", "FANG", "EBAY", "ROKU", "EXPE", "TWLO", "TTD", "CASY",
+    "OKTA", "ENTG", "NTAP", "IBKR", "ALNY", "HBAN", "ULTA", "ZM", "INSM",
+    "TSCO", "FITB", "PINS", "NTRA", "AMKR", "CHRW", "ONTO", "SITM", "SWKS",
+    "RMBS", "AFRM", "FOXA", "W", "BIDU", "ILMN", "UTHR", "ENPH", "JD", "VIAV",
+    "AEIS", "FIVE", "JBHT", "FFIV", "LSCC", "SNAP", "PODD", "TECH", "TYL",
+    "VRSN", "DECK", "TROW", "NVMI", "FORM", "ETSY", "JAZZ", "CHWY", "WING",
+    "SANM", "SAIA", "EXPD", "DOCU", "FWONK", "DUOL", "TXRH", "ALGN", "NBIX",
+    "JKHY", "NTRS", "EPAM", "NTNX", "GRAB", "INCY", "CHKP", "SFM", "SEDG",
+    "AXSM", "MEDP", "IONS", "SSNC", "GTLB", "GEN", "CACI", "WIX", "ARWR",
+    "VSAT", "OLLI", "MTCH", "TCOM", "HALO", "UPST", "ICLR", "EXEL", "CROX",
+    "SIRI", "MNDY", "TWST", "PNFP", "NWSA", "RUN", "BMRN", "EWBC", "ALGM",
+    "NTES", "CAKE", "LOGI", "QRVO", "PTCT", "DBX", "UCTT", "HSIC", "ZION",
+    "SYNA", "BILL", "CRUS", "BSY", "CRSP", "TENB", "QLYS", "PCTY", "SLAB",
+    "LSTR", "ALKS", "CORT", "RNG", "ACLS", "HQY", "PLXS", "LKQ", "CAMT",
+    "WTFC", "NTLA", "BOX", "SEIC", "VIRT", "ICHR", "VECO", "VRNS", "POWI",
+    "FIVN", "APPF", "NICE", "CBSH",
 ]
 
 _STATE = {"status": "idle", "done": 0, "total": 0, "current": "",
@@ -72,19 +94,25 @@ def load_cached():
             pass
 
 
-def scan_one(ticker: str, period="2y", epochs=8, n_walks=3) -> dict:
-    """단일 종목 고속 분석 → 정확도/예측 요약."""
+def scan_one(ticker: str, period="2y", epochs=8, n_walks=3,
+             horizon: int = 1) -> dict:
+    """단일 종목 고속 분석 → 정확도/예측 요약.
+
+    horizon: 라벨 전망 기간(거래일). 1=익일, 5=1주, 21=1개월.
+    horizon>1 이면 학습 구간 끝 horizon-1 개를 잘라 라벨 누수를 막는다.
+    """
     df = data_mod.history(ticker, period)
     if len(df) < 150:
         raise ValueError("데이터 부족")
-    X, y, dates = gaf.build_dataset(df, 20)
+    X, y, dates = gaf.build_dataset(df, 20, horizon=horizon)
     labeled = y >= 0
     Xl, yl = X[labeled], y[labeled]
     dl = [d for d, m in zip(dates, labeled) if m]
     model = vae.train_vae(Xl, epochs=epochs, latent_dim=15)
     Z_all = vae.extract_latents(model, X)
     Zl = Z_all[labeled]
-    wf = models.walk_forward(Zl, yl, dl, n_walks=n_walks, test_days=21)
+    wf = models.walk_forward(Zl, yl, dl, n_walks=n_walks, test_days=21,
+                             embargo=horizon - 1)
     bundle = models.fit_classifiers(Zl, yl)
     p_up = float(models.predict_proba(bundle, Z_all[-1:])["ensemble"][0])
     cal = bt.calibrate_threshold(wf["per_day"])
@@ -96,6 +124,7 @@ def scan_one(ticker: str, period="2y", epochs=8, n_walks=3) -> dict:
     exp_ret = p_up * up_m + (1 - p_up) * dn_m
     return {
         "ticker": ticker,
+        "horizon": horizon,
         "accuracy": avg.get("accuracy", float("nan")),
         "f1": avg.get("f1", float("nan")),
         "auc": avg.get("auc", float("nan")),
@@ -141,3 +170,50 @@ def stop_scan():
 
 
 load_cached()
+
+
+def scan_stats() -> dict:
+    """스캔 결과가 '우연'과 구분되는지 이항검정.
+
+    종목당 표본이 63개뿐이라 우연만으로도 정확도 표준편차가 6.3%p 다.
+    따라서 '정확도 55% 이상 N개' 같은 집계는 의미가 없고, 우연 기대치와
+    비교해야 한다. 다중검정(250종목 중 최고를 고름) 보정도 함께 계산한다.
+    """
+    import math
+    from scipy import stats as sps
+
+    rows = [x for x in _STATE["results"] if x.get("accuracy", -1) >= 0]
+    if len(rows) < 2:
+        return {"n_tickers": len(rows), "ready": False}
+    acc = [x["accuracy"] for x in rows]
+    vals = sorted(set(round(a, 6) for a in acc))
+    gaps = [b - a for a, b in zip(vals, vals[1:]) if b - a > 1e-9]
+    n = round(1 / min(gaps)) if gaps else 63          # 종목당 표본 수 역산
+    N = len(acc)
+
+    buckets = []
+    for th in (0.50, 0.55, 0.60):
+        k = math.ceil(th * n - 1e-9)
+        p_one = float(1 - sps.binom.cdf(k - 1, n, 0.5))
+        obs = sum(a >= th - 1e-9 for a in acc)
+        buckets.append({"threshold": th, "observed": obs,
+                        "expected_by_chance": round(p_one * N, 1),
+                        "ratio": round(obs / (p_one * N), 2) if p_one * N else None})
+
+    hits = sum(round(a * n) for a in acc)
+    pooled_p = float(sps.binomtest(hits, N * n, 0.5, alternative="greater").pvalue)
+    best = max(acc)
+    p_best = float(1 - sps.binom.cdf(round(best * n) - 1, n, 0.5))
+    return {
+        "ready": True, "n_tickers": N, "samples_per_ticker": n,
+        "mean_accuracy": sum(acc) / N,
+        "median_accuracy": sorted(acc)[N // 2],
+        "chance_std": math.sqrt(0.25 / n),
+        "buckets": buckets,
+        "pooled": {"hits": hits, "total": N * n, "accuracy": hits / (N * n),
+                   "p_value": pooled_p, "significant": pooled_p < 0.05},
+        "best": {"ticker": max(rows, key=lambda v: v["accuracy"])["ticker"],
+                 "accuracy": best, "p_value": p_best,
+                 "p_value_corrected": float(1 - (1 - p_best) ** N),
+                 "significant": (1 - (1 - p_best) ** N) < 0.05},
+    }

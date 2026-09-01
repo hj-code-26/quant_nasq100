@@ -2,6 +2,7 @@ fastapi
 uvicorn[standard]
 torch
 scikit-learn
+scipy
 numpy
 pandas
 yfinance

@@ -51,13 +51,17 @@ def _metrics(y_true, prob):
 
 
 def walk_forward(Z: np.ndarray, y: np.ndarray, dates, n_walks: int = 6,
-                 test_days: int = 21):
+                 test_days: int = 21, embargo: int = 0):
     """
     Walk-forward Validation (논문 [그림 3.6], [표 3.6]).
 
     마지막 n_walks * test_days 구간을 1개월(≈21거래일) 단위로 나누어,
     각 walk 마다 그 이전 전체 데이터로 분류기를 학습하고 다음 구간을 검증.
     (실시간 구동을 위해 VAE 는 고정하고 분류기만 walk 별 재학습)
+
+    embargo: 학습 구간 끝에서 잘라낼 표본 수. horizon>1 인 라벨은 미래 h일
+    종가를 참조하므로, 학습 구간 마지막 h개 표본의 라벨은 테스트 구간의
+    가격을 이미 알고 있다. embargo=horizon-1 로 그 구간을 버려 누수를 막는다.
     """
     n = len(y)
     results = []
@@ -67,12 +71,15 @@ def walk_forward(Z: np.ndarray, y: np.ndarray, dates, n_walks: int = 6,
         test_start = test_end - test_days
         if test_start <= 40:
             continue
-        bundle = fit_classifiers(Z[:test_start], y[:test_start])
+        train_end = test_start - embargo          # 라벨 누수 구간 제외
+        if train_end <= 40:
+            continue
+        bundle = fit_classifiers(Z[:train_end], y[:train_end])
         probs = predict_proba(bundle, Z[test_start:test_end])
         yt = y[test_start:test_end]
         row = {
             "walk": w + 1,
-            "train_end": str(dates[test_start - 1].date()),
+            "train_end": str(dates[train_end - 1].date()),
             "test_start": str(dates[test_start].date()),
             "test_end": str(dates[test_end - 1].date()),
         }

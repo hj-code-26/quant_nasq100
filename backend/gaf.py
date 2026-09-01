@@ -56,15 +56,19 @@ def ohlc_gaf_image(open_, high, low, close, dual: bool = True) -> np.ndarray:
     return np.stack(ch)
 
 
-def build_dataset(df, window: int = 20, dual: bool = True):
+def build_dataset(df, window: int = 20, dual: bool = True, horizon: int = 1):
     """
     슬라이딩 윈도우(=1일 이동, 논문 3.1절)로 GAF 이미지 데이터셋 생성.
 
     df: Open/High/Low/Close 컬럼을 가진 DataFrame (일봉)
-    반환: X (M, C, 2W, 2W), y (M,)  — y=1 이면 익일 종가 상승(>=), 0 하락,
+    horizon: 라벨의 전망 기간(거래일). 1=익일, 5=1주, 21=1개월.
+    반환: X (M, C, 2W, 2W), y (M,)  — y=1 이면 horizon 일 뒤 종가 상승(>=), 0 하락,
           dates: 각 윈도우의 마지막 거래일 (예측 기준일)
-    윈도우 마지막 날 t 에 대해 라벨은 C_{t+1} >= C_t.
-    마지막 윈도우(라벨 없음)는 y=-1 로 반환하여 실시간 예측에 사용.
+    윈도우 마지막 날 t 에 대해 라벨은 C_{t+horizon} >= C_t.
+    라벨을 만들 수 없는 마지막 horizon 개 윈도우는 y=-1 (실시간 예측용).
+
+    주의: horizon>1 이면 이웃 표본이 미래 구간을 공유해 서로 독립이 아니다.
+    유효 표본 수는 대략 n/horizon 이므로 유의성 검정 때 반드시 보정해야 한다.
     """
     o = df["Open"].to_numpy(float)
     h = df["High"].to_numpy(float)
@@ -76,8 +80,8 @@ def build_dataset(df, window: int = 20, dual: bool = True):
         s = t - window + 1
         X.append(ohlc_gaf_image(o[s:t + 1], h[s:t + 1], l[s:t + 1],
                                 c[s:t + 1], dual=dual))
-        if t + 1 < n:
-            y.append(1 if c[t + 1] >= c[t] else 0)
+        if t + horizon < n:
+            y.append(1 if c[t + horizon] >= c[t] else 0)
         else:
             y.append(-1)
         dates.append(df.index[t])
