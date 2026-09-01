@@ -10,6 +10,11 @@ GAF (Gramian Angular Field) 인코딩 — 논문 3.2.2절 구현.
 """
 import numpy as np
 
+# 라벨 임계 수익률: 왕복 거래비용(편도 5bp) 이상 움직인 날만 '상승'으로 본다.
+# 논문/기존 구현은 c[t+1] >= c[t] 를 상승으로 세어 거래비용에도 못 미치는
+# 미세 변동을 신호로 학습했다.
+LABEL_EPS = 0.0010
+
 
 def _rescale(x: np.ndarray) -> np.ndarray:
     """식 (3.1): [-1, 1] 구간으로 표준화."""
@@ -56,16 +61,23 @@ def ohlc_gaf_image(open_, high, low, close, dual: bool = True) -> np.ndarray:
     return np.stack(ch)
 
 
-def build_dataset(df, window: int = 20, dual: bool = True, horizon: int = 1):
+def build_dataset(df, window: int = 20, dual: bool = True, horizon: int = 1,
+                  label_eps: float = LABEL_EPS):
     """
     슬라이딩 윈도우(=1일 이동, 논문 3.1절)로 GAF 이미지 데이터셋 생성.
 
     df: Open/High/Low/Close 컬럼을 가진 DataFrame (일봉)
     horizon: 라벨의 전망 기간(거래일). 1=익일, 5=1주, 21=1개월.
-    반환: X (M, C, 2W, 2W), y (M,)  — y=1 이면 horizon 일 뒤 종가 상승(>=), 0 하락,
-          dates: 각 윈도우의 마지막 거래일 (예측 기준일)
-    윈도우 마지막 날 t 에 대해 라벨은 C_{t+horizon} >= C_t.
+    label_eps: 상승으로 셀 최소 수익률. 기본 10bp(편도 거래비용).
+        0 으로 주면 논문의 단순 등락 라벨.
+
+    반환: X (M, C, 2W, 2W), y (M,)  — y=1 이면 horizon 일 뒤 수익률 > label_eps,
+          0 이면 그 이하.  dates: 각 윈도우의 마지막 거래일 (예측 기준일)
+    윈도우 마지막 날 t 에 대해 라벨은 C_{t+horizon}/C_t - 1 > label_eps.
     라벨을 만들 수 없는 마지막 horizon 개 윈도우는 y=-1 (실시간 예측용).
+
+    두 인자는 함께 쓰라고 있는 것이다 — 거래비용에도 못 미치는 미세 변동을
+    '상승'으로 학습하지 않으면서(label_eps), 보유 기간을 명시한다(horizon).
 
     주의: horizon>1 이면 이웃 표본이 미래 구간을 공유해 서로 독립이 아니다.
     유효 표본 수는 대략 n/horizon 이므로 유의성 검정 때 반드시 보정해야 한다.
@@ -81,7 +93,7 @@ def build_dataset(df, window: int = 20, dual: bool = True, horizon: int = 1):
         X.append(ohlc_gaf_image(o[s:t + 1], h[s:t + 1], l[s:t + 1],
                                 c[s:t + 1], dual=dual))
         if t + horizon < n:
-            y.append(1 if c[t + horizon] >= c[t] else 0)
+            y.append(1 if (c[t + horizon] / c[t] - 1.0) > label_eps else 0)
         else:
             y.append(-1)
         dates.append(df.index[t])
