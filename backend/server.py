@@ -1,11 +1,11 @@
-"""FastAPI 서버 — 분석/스캔/AI감사 API + 프론트엔드 서빙."""
+"""FastAPI 서버 — 분석/스캔/매매 API + 프론트엔드 서빙."""
 import math
 import pathlib
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 
-from . import ablation, ai_auditor
+from . import ablation
 from . import data as data_mod
 from . import nasdaq100, pipeline, trader
 from .toss import TossClient, TossError
@@ -97,18 +97,6 @@ def api_scan_stop():
 @app.get("/api/scan/status")
 def api_scan_status():
     return JSONResponse(_json_safe(nasdaq100.get_state()))
-
-
-# ---------- AI 코드 감사 ----------
-
-@app.post("/api/audit/start")
-def api_audit_start(auto_fix: bool = True):
-    return JSONResponse(ai_auditor.start_audit(auto_fix))
-
-
-@app.get("/api/audit/status")
-def api_audit_status():
-    return JSONResponse(ai_auditor.get_state())
 
 
 @app.get("/api/scan/stats")

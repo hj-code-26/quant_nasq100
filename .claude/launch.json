@@ -2,11 +2,35 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "quant",
+      "name": "autotrade",
       "runtimeExecutable": "python3",
-      "runtimeArgs": ["run.py"],
-      "port": 8899,
-      "autoPort": true
+      "runtimeArgs": [
+        "autotrade_server.py"
+      ],
+      "port": 8877
+    },
+    {
+      "name": "dashboard",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": [
+        "-m",
+        "streamlit",
+        "run",
+        "streamlit_app.py",
+        "--server.headless",
+        "true",
+        "--server.port",
+        "8501"
+      ],
+      "port": 8501
+    },
+    {
+      "name": "omniroute",
+      "runtimeExecutable": "omniroute",
+      "runtimeArgs": [
+        "serve"
+      ],
+      "port": 20128
     }
   ]
 }

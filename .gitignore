@@ -1,26 +1,17 @@
-# Python
 __pycache__/
 *.py[cod]
-*.egg-info/
 .venv/
 venv/
-
-# AI 감사 에이전트가 만드는 패치 백업
-*.py.bak
-
-# 학습된 VAE 가중치 / 스캔 결과 캐시 (재생성 가능, 용량 큼)
-models_cache/*.pt
-models_cache/*.joblib
-models_cache/scan_results*.json
-
-# macOS
 .DS_Store
 
 # 비밀키
 .env
 
-# 런타임 산출물 (재생성 가능)
-server.log
-models_cache/month_scan.json
-backend/trade_journal.jsonl
-backend/plan_history.jsonl
+# 매매 기록 DB
+trading_decisions.db
+
+# 백테스트 일봉 캐시
+data_cache/
+
+# 토스 토큰 캐시 (프로세스 간 공유)
+.toss_token.json
