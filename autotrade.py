@@ -7,8 +7,8 @@
   3) 배분       : 종목별 판단 + 계좌 상태 + 규칙을 Claude 에 주고 최종 주문 목록 (호출 1회)
                  → 코드가 규칙(최대 종목 수·비중·현금 유지·최소 주문)으로 다시 검증 → 주문
 
-실행:  python autotrade.py            (즉시 1회 + TRADE_TIMES 에 반복)
-       python autotrade.py --once     (1회만)
+실행:  python autotrade.py            (즉시 1회 + TRADE_TIMES 에 반복. 예약 실행은 정규장 시간에만)
+       python autotrade.py --once     (1회만, 장 시간 무시)
 설정:  .env 참고. DRY_RUN=1 이면 주문 없이 전 과정을 기록만 한다.
 """
 import concurrent.futures
@@ -44,7 +44,10 @@ PRICES = {"fable": (10, 50), "opus": (5, 25), "sonnet": (2, 10), "haiku": (1, 5)
 BASE_URL = os.environ.get("ANTHROPIC_BASE_URL") or "https://api.anthropic.com"
 GATEWAY = "api.anthropic.com" not in BASE_URL             # OmniRoute 등 게이트웨이 경유 여부
 DRY_RUN = os.environ.get("DRY_RUN", "1") == "1"           # 기본은 모의. 실주문은 DRY_RUN=0
-TRADE_TIMES = [t.strip() for t in os.environ.get("TRADE_TIMES", "23:40,01:40,03:40").split(",")]
+# 실행 시각 (KST): 개장 22:30 → 1시간 뒤 23:30 → 00:00 부터 2시간 간격. 정규장 종료(05:00/06:00) 1시간 전까지.
+# 겨울(서머타임 해제)엔 개장이 23:30 이라 22:30 실행은 "장 시작 전"으로 자동 건너뛴다.
+TRADE_TIMES = [t.strip() for t in
+               os.environ.get("TRADE_TIMES", "22:30,23:30,00:00,02:00,04:00").split(",")]
 
 SCREEN_N = int(os.environ.get("SCREEN_N", 40))            # 규칙 점수 상위 몇 개를 Claude 에 보여줄지
 TOP_N = int(os.environ.get("TOP_N", 5))                   # Claude 가 고르는 후보 수
@@ -255,6 +258,18 @@ def fractional_allowed(session):
         return False
     now = datetime.datetime.now(KST)
     return session[0] <= now <= session[1] - datetime.timedelta(hours=1)
+
+
+def session_block(session):
+    """지금 실행하면 안 되는 이유. 정규장 시작 5분 전 ~ 종료 사이면 None(실행 가능)."""
+    if not session:
+        return "휴장일"
+    now = datetime.datetime.now(KST)
+    if now < session[0] - datetime.timedelta(minutes=5):
+        return f"장 시작 전 (개장 {session[0]:%H:%M} KST)"
+    if now > session[1]:
+        return f"장 마감 후 (마감 {session[1]:%H:%M} KST)"
+    return None
 
 
 # ---------- Claude 토큰 집계 ----------
@@ -578,9 +593,10 @@ def place_order(toss, run_id, o):
 
 
 # ---------- 한 사이클 ----------
-def run_cycle(dry_run=None):
+def run_cycle(dry_run=None, force=False):
     """한 사이클. dry_run 을 명시하지 않으면 환경변수 DRY_RUN 을 따른다.
-    (대시보드처럼 다른 프로세스·스레드에서 부를 때는 반드시 명시할 것 — 전역에 기대지 않는다)"""
+    (대시보드처럼 다른 프로세스·스레드에서 부를 때는 반드시 명시할 것 — 전역에 기대지 않는다)
+    force=True 면 장 시작 전·마감 후에도 실행한다 (휴장일은 여전히 건너뜀). 수동 1회 실행용."""
     dry = DRY_RUN if dry_run is None else bool(dry_run)
     run_id = db_insert("runs", {"timestamp": _now(), "dry_run": int(dry), "status": "running",
                                 "model": MODEL})
@@ -589,9 +605,10 @@ def run_cycle(dry_run=None):
     try:
         toss = shared_client()
         session = market_session(toss)
-        if not session:
-            log.info("휴장일 — 건너뜀")
-            db_update_run(run_id, status="skipped", summary="휴장일")
+        why = session_block(session)
+        if why and not force:
+            log.info("%s — 건너뜀 (강제 실행은 --force 또는 대시보드 1회 실행)", why)
+            db_update_run(run_id, status="skipped", summary=why)
             return
         account = account_state(toss)
         db_update_run(run_id, total_value=account["total_value"], cash=account["cash"])
@@ -664,7 +681,7 @@ if __name__ == "__main__":
     log.info("모델 %s @ %s · 후보 %d · 최대 %d종목 · 종목당 %.0f%% · 현금유지 %.0f%% · 실행 %s%s",
              MODEL, BASE_URL, TOP_N, MAX_POSITIONS, MAX_POSITION_PCT,
              CASH_RESERVE_PCT, ", ".join(TRADE_TIMES), " · DRY_RUN" if DRY_RUN else " · 실주문")
-    run_cycle()
+    run_cycle(force="--force" in sys.argv or "--once" in sys.argv)   # 수동 실행은 장 시간 무시
     if "--once" in sys.argv:
         sys.exit(0)
     for t in TRADE_TIMES:

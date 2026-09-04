@@ -29,18 +29,19 @@ class Controller:
         self.history = collections.deque(maxlen=20)
         self._lock = threading.Lock()
 
-    def run_once(self):
+    def run_once(self, force=False):
+        """force=True(버튼)면 장 시간 무시. 예약 실행(force=False)은 장 시작 전·마감 후 건너뜀."""
         with self._lock:
             if self.busy:
                 return False
             self.busy = True
-        threading.Thread(target=self._run, daemon=True).start()
+        threading.Thread(target=self._run, args=(force,), daemon=True).start()
         return True
 
-    def _run(self):
+    def _run(self, force=False):
         try:
             import autotrade   # 스트림릿이 모듈을 다시 불러와도 현재 모듈을 쓰도록 매번 import
-            autotrade.run_cycle(dry_run=self.dry_run)   # 모드는 전역이 아니라 인자로 명시
+            autotrade.run_cycle(dry_run=self.dry_run, force=force)   # 모드는 전역이 아니라 인자로 명시
         finally:
             self.busy = False
             self.last_run = datetime.datetime.now(at.KST)
@@ -90,7 +91,7 @@ st.caption(f"모델 {at.MODEL} @ {at.BASE_URL} · 후보 {at.TOP_N} · 최대 {a
 
 c = st.columns([1, 1, 1, 2])
 if c[0].button("지금 1회 실행", type="primary", disabled=ctl.busy, width="stretch"):
-    ctl.run_once()
+    ctl.run_once(force=True)
     st.rerun()
 if ctl.auto:
     if c[1].button("자동 실행 중지", width="stretch"):
