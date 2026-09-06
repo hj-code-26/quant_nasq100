@@ -764,3 +764,293 @@ KeyError: 'usd_balance'
 2026-09-04 12:47:05,931 INFO 주문 buy SMCI $152.08 → 2SIpZoL0sttxQlQSjeHRfwcJcyKUZgb74VK2A53CUDlkFKlP18Ll62H_6MyschAe
 2026-09-04 12:47:05,936 INFO === run 25 완료: 주문 2건, 제외 1건 ===
 2026-09-04 12:47:05,937 INFO 토큰: Claude 9회, 입력 175,292, 출력 4,521, 추정 $0.3958 (claude/claude-sonnet-5 API 단가 기준)
+2026-09-04 13:28:47,026 INFO === run 26 시작 (DRY_RUN, claude/claude-sonnet-5) ===
+2026-09-04 13:28:47,272 ERROR run 26 실패: 403 ip-not-allowed: 허용되지 않은 IP 주소입니다.
+Traceback (most recent call last):
+  File "/Users/ryan/quant_new/autotrade.py", line 607, in run_cycle
+    session = market_session(toss)
+              ^^^^^^^^^^^^^^^^^^^^
+  File "/Users/ryan/quant_new/autotrade.py", line 247, in market_session
+    day = (toss.us_market_calendar(date=us_today) or {}).get("today") or {}
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/ryan/quant_new/toss.py", line 152, in us_market_calendar
+    return self._call("GET", "/api/v1/market-calendar/US", params={"date": date})
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/ryan/quant_new/toss.py", line 126, in _call
+    raise TossError(r.status_code, err.get("code"), err.get("message"), err.get("data"))
+toss.TossError: 403 ip-not-allowed: 허용되지 않은 IP 주소입니다.
+2026-09-04 13:28:47,279 INFO 토큰: Claude 0회, 입력 0, 출력 0, 추정 $0.0000 (claude/claude-sonnet-5 API 단가 기준)
+2026-09-04 14:25:49,493 INFO 주문 제외 sell GHOST: 보유하지 않은 종목
+2026-09-04 14:25:49,494 INFO 주문 제외 buy WEAK: 20일 수익률 -5.0% — 모멘텀 음수는 매수 안 함
+2026-09-04 14:25:49,494 INFO 주문 제외 buy BUSY: 미체결 주문 있음
+2026-09-04 14:25:49,494 INFO 주문 제외 buy UNKNOWN: 판단 대상이 아닌 종목
+2026-09-04 14:25:49,494 INFO 주문 제외 buy GOOD: 금액 $0.00 < 최소 $5.0 (비중·현금 한도 적용 후)
+2026-09-04 14:25:49,494 INFO 주문 제외 buy GOOD: 최대 보유 종목 수 5 초과
+2026-09-04 14:26:05,250 INFO 주문 제외 buy GOOD: 금액 $4.80 < 최소 $5.0 (비중·현금 한도 적용 후)
+2026-09-04 14:26:05,250 INFO 주문 제외 buy GOOD: 금액 $3.00 < 최소 $5.0 (비중·현금 한도 적용 후)
+2026-09-04 18:04:16,727 INFO === run 27 시작 (DRY_RUN, claude/claude-sonnet-5) ===
+2026-09-04 18:04:17,003 INFO 장 시작 전 (개장 22:30 KST) — 건너뜀 (강제 실행은 --force 또는 대시보드 1회 실행)
+2026-09-04 18:04:17,009 INFO 토큰: Claude 0회, 입력 0, 출력 0, 추정 $0.0000 (claude/claude-sonnet-5 API 단가 기준)
+2026-09-04 22:30:00,886 INFO === run 28 시작 (실주문, claude/claude-sonnet-5) ===
+2026-09-04 22:30:01,581 INFO 계좌: 현금 $248.88 총자산 $606.94 보유 ['SMCI', 'MSTR', 'TEAM', 'KDP']
+2026-09-04 22:30:12,231 INFO 스크리닝 101종목, 20일 수익률 상위: [('MRNA', 159.42), ('MSTR', 37.35), ('TEAM', 27.45), ('SMCI', 22.65), ('WDAY', 13.31), ('CDW', 12.31), ('GILD', 12.12), ('CPRT', 12.07)]
+2026-09-04 22:30:32,724 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-04 22:30:32,746 INFO Claude 호출: 입력 8,658 출력 1,539 토큰
+2026-09-04 22:30:32,747 INFO 후보: ['WDAY', 'CDW', 'GILD', 'CPRT', 'MU']
+2026-09-04 22:30:37,941 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-04 22:30:37,942 INFO Claude 호출: 입력 20,489 출력 252 토큰
+2026-09-04 22:30:37,943 INFO 판단 GILD: buy 60% — 20일 +12.78%로 중간 모멘텀 구간 유지, 일봉 SMA10>20>50 정배열에 MACD 플러스 지속되며 60일 기준 추세도 견조하고 atr
+2026-09-04 22:30:38,321 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-04 22:30:38,324 INFO Claude 호출: 입력 23,552 출력 246 토큰
+2026-09-04 22:30:38,325 INFO 판단 WDAY: buy 45% — 20일 +13.9%로 중 모멘텀 구간 유지, SMA10/20/50 정배열이며 8/13 갭업 후 조정을 소화하고 200선 위에서 재차 안착. 다만
+2026-09-04 22:30:38,410 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-04 22:30:38,412 INFO Claude 호출: 입력 18,388 출력 245 토큰
+2026-09-04 22:30:38,413 INFO 판단 CDW: buy 55% — 20일 수익률 +12.08%로 중간 모멘텀 구간 유지, 백테스트상 우호적 구간이다. 일봉 SMA10>20>50 정배열, MACD 3.72가 시그
+2026-09-04 22:30:43,358 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-04 22:30:43,359 INFO Claude 호출: 입력 23,957 출력 207 토큰
+2026-09-04 22:30:43,359 INFO 판단 SMCI: hold 0% — 20일 수익률 +22.55%로 강 모멘텀 구간 유지 중이며 백테스트상 이후 20일도 초과수익 우위 구간이다. 일봉 SMA_10/20/50 정배열
+2026-09-04 22:30:43,667 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-04 22:30:43,668 INFO Claude 호출: 입력 20,865 출력 219 토큰
+2026-09-04 22:30:43,669 INFO 판단 CPRT: buy 55% — 20일 수익률 +11.68%로 중간 모멘텀 구간 진입, 일봉 MACD가 시그널 위에서 양전환 유지되고 SMA10>SMA20>SMA50 정배열로 
+2026-09-04 22:30:44,722 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-04 22:30:44,725 INFO Claude 호출: 입력 20,969 출력 224 토큰
+2026-09-04 22:30:44,726 INFO 판단 MU: buy 55% — 20일 수익률 +11.5%로 중간 모멘텀 구간 진입, MACD가 8월 중순 골든크로스 이후 양전 유지되고 최근 며칠 조정 후 재차 신고가(978
+2026-09-04 22:30:49,232 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-04 22:30:49,234 INFO Claude 호출: 입력 22,469 출력 236 토큰
+2026-09-04 22:30:49,234 INFO 판단 KDP: hold 0% — 20일 수익률 +8.96%로 여전히 양수 모멘텀을 유지 중이고, 일봉 MACD(0.48)가 시그널(0.35) 위 정배열이며 종가는 SMA10·S
+2026-09-04 22:30:49,549 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-04 22:30:49,550 INFO Claude 호출: 입력 23,574 출력 248 토큰
+2026-09-04 22:30:49,550 INFO 판단 MSTR: hold 0% — 20일 수익률 +39.66%로 강 모멘텀 유지 중이고 일봉 SMA10>20>50 정배열, MACD도 시그널선 위에서 확산되며 뉴스 악재도 없다.
+2026-09-04 22:30:59,372 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-04 22:30:59,374 INFO Claude 호출: 입력 23,245 출력 997 토큰
+2026-09-04 22:30:59,375 INFO 판단 TEAM: hold 0% — 20일 수익률 +28.09%로 여전히 강모멘텀 구간을 유지하고 있어 백테스트상 매도 근거가 되지 않는다. 최근 며칠 고점(194~197) 대비 
+2026-09-04 22:31:11,144 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-04 22:31:11,146 INFO Claude 호출: 입력 5,209 출력 923 토큰
+2026-09-04 22:31:11,146 INFO 배분 요약: 보유 4종목(SMCI, MSTR, TEAM, KDP) 모두 20일 수익률 양수·추세 유지 중이며 매도 판단도 없어 그대로 보유. 최대 보유 종목 수(5) 제한으로 신규 매수는 1자리만 가능해, buy 후보(GILD·WDAY·CDW·CPRT·MU) 중 20일 모멘텀이 가장 높은 WDAY만 승인하고 나머지는 자리 부족으로 이번 사이클 보류.
+2026-09-04 22:31:11,309 INFO 주문 buy WDAY $127.46 → H8ebmUpADZYhmjbhBibraq1BTlWUUZcDsniDKTYDh2fM-8Tx2qyTN4BWlZR969AF
+2026-09-04 22:31:11,313 INFO === run 28 완료: 주문 1건, 제외 0건 ===
+2026-09-04 22:31:11,314 INFO 토큰: Claude 11회, 입력 211,375, 출력 5,336, 추정 $0.4761 (claude/claude-sonnet-5 API 단가 기준)
+2026-09-04 22:37:14,107 INFO === run 29 시작 (실주문, claude/claude-sonnet-5) ===
+2026-09-04 22:37:14,386 INFO 계좌: 현금 $121.43 총자산 $608.26 보유 ['SMCI', 'MSTR', 'TEAM', 'WDAY', 'KDP']
+2026-09-04 22:37:25,996 INFO 스크리닝 101종목, 20일 수익률 상위: [('MRNA', 147.63), ('MSTR', 39.26), ('TEAM', 26.89), ('SMCI', 24.99), ('MU', 13.5), ('GILD', 12.77), ('CPRT', 11.73), ('VRTX', 11.72)]
+2026-09-04 22:37:50,389 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-04 22:37:50,390 INFO Claude 호출: 입력 8,671 출력 1,988 토큰
+2026-09-04 22:37:50,390 INFO 후보: ['MU', 'GILD', 'CPRT', 'VRTX', 'NFLX']
+2026-09-04 22:37:54,851 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-04 22:37:54,853 INFO Claude 호출: 입력 21,178 출력 224 토큰
+2026-09-04 22:37:54,853 INFO 판단 CPRT: buy 55% — 20일 수익률 +11.67%로 중간 모멘텀 구간 유지, SMA10>SMA20>SMA50 정배열과 MACD 양전환이 이어지고 있다. 8/19~21
+2026-09-04 22:37:55,101 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-04 22:37:55,102 INFO Claude 호출: 입력 20,827 출력 220 토큰
+2026-09-04 22:37:55,103 INFO 판단 GILD: buy 60% — 20일 +13.0%로 중간 모멘텀 구간 유지, 일봉 SMA10>20>50 정배열과 MACD 플러스로 60일 추세도 견조. RSI·볼린저 상단권 
+2026-09-04 22:37:55,927 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-04 22:37:55,929 INFO Claude 호출: 입력 21,235 출력 238 토큰
+2026-09-04 22:37:55,929 INFO 판단 MU: buy 60% — 20일 수익률 +13.46%로 중 모멘텀 구간, MACD 골든크로스 이후 양전 유지되며 최근 신고가 995.65 갱신 중. 일봉 RSI 58, 
+2026-09-04 22:38:00,372 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-04 22:38:00,373 INFO Claude 호출: 입력 19,583 출력 199 토큰
+2026-09-04 22:38:00,374 INFO 판단 VRTX: buy 55% — 20일 수익률 +12%로 중 모멘텀 구간 진입, SMA10/20/50 정배열에 MACD 히스토그램은 둔화됐지만 여전히 양전. RSI 65선으로 
+2026-09-04 22:38:01,183 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-04 22:38:01,184 INFO Claude 호출: 입력 21,656 출력 229 토큰
+2026-09-04 22:38:01,184 INFO 판단 NFLX: buy 55% — 20일 수익률 +11.2%로 중간 모멘텀 구간을 유지하고 있고, 일봉 SMA10>20>50 정배열과 MACD 양수(1.99)로 중기 상승추세가 
+2026-09-04 22:38:01,280 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-04 22:38:01,282 INFO Claude 호출: 입력 23,942 출력 184 토큰
+2026-09-04 22:38:01,282 INFO 판단 SMCI: hold 0% — 20일 수익률 +24.67%로 강 모멘텀 구간이 유지되고 있고 보유 손익도 +1.99%로 양호하다. 일봉 SMA_10/20/50 정배열과 MAC
+2026-09-04 22:38:05,968 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-04 22:38:05,969 INFO Claude 호출: 입력 23,899 출력 237 토큰
+2026-09-04 22:38:05,970 INFO 판단 MSTR: hold 0% — 20일 수익률 +40.44%로 강 모멘텀 유지, 일봉 SMA10>20>50 정배열에 MACD도 시그널선 위 확산 지속 중이며 뉴스 악재 없음. 
+2026-09-04 22:38:06,972 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-04 22:38:06,974 INFO Claude 호출: 입력 23,802 출력 270 토큰
+2026-09-04 22:38:06,974 INFO 판단 WDAY: hold 0% — 20일 수익률 +10.84%로 중 모멘텀 구간을 유지하고 있어 기본은 보유 지속이다. 다만 일봉 MACD 히스토그램이 마이너스로 전환된 채 확대
+2026-09-04 22:38:10,021 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-04 22:38:10,023 INFO Claude 호출: 입력 22,466 출력 228 토큰
+2026-09-04 22:38:10,023 INFO 판단 KDP: hold 0% — 20일 수익률 +8.88%로 양수 모멘텀이 유지되고, 일봉 MACD(0.48)가 시그널(0.35) 위 정배열이며 종가는 SMA10·SMA20·S
+2026-09-04 22:38:15,897 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-04 22:38:15,898 INFO Claude 호출: 입력 23,592 출력 995 토큰
+2026-09-04 22:38:15,899 INFO 판단 TEAM: hold 0% — 20일 수익률 +26.91%로 여전히 강모멘텀 구간을 유지 중이며 검증된 백테스트상 이 구간은 매도 근거가 되지 않는다. 일봉 MACD 히스토그
+2026-09-04 22:38:30,509 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-04 22:38:30,509 INFO Claude 호출: 입력 5,511 출력 1,205 토큰
+2026-09-04 22:38:30,509 INFO 배분 요약: 보유 5종목(SMCI, MSTR, TEAM, WDAY, KDP)이 최대 종목 수를 모두 채우고 있고, 전 종목 20일 수익률이 양수(+8.88%~+40.44%)로 모멘텀이 살아있어 매도 판단도 없다. 신규 매수 후보 CPRT·GILD·MU·VRTX·NFLX는 모두 중간 모멘텀(+11~13%)이지만, KDP(+8.88%)를 제외한 나머지 보유 종목이 더 강한 모멘텀을 유지 중이라 자리를 내줄 근거가 부족하고 KDP도 음수 전환이 아니므로 강제 매도하지 않는다. 결과적으로 이번 사이클은 매도·매수 없이 관망한다.
+2026-09-04 22:38:30,510 INFO === run 29 완료: 주문 0건, 제외 0건 ===
+2026-09-04 22:38:30,511 INFO 토큰: Claude 12회, 입력 236,362, 출력 6,217, 추정 $0.5349 (claude/claude-sonnet-5 API 단가 기준)
+2026-09-04 23:30:00,677 INFO === run 30 시작 (실주문, claude/claude-sonnet-5) ===
+2026-09-04 23:30:00,958 INFO 계좌: 현금 $121.43 총자산 $612.50 보유 ['SMCI', 'MSTR', 'TEAM', 'WDAY', 'KDP']
+2026-09-04 23:30:12,959 INFO 스크리닝 101종목, 20일 수익률 상위: [('MRNA', 144.74), ('MSTR', 39.89), ('TEAM', 29.58), ('SMCI', 26.76), ('MU', 13.88), ('CPRT', 12.91), ('CDW', 12.86), ('GILD', 12.7)]
+2026-09-04 23:30:37,942 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-04 23:30:37,944 INFO Claude 호출: 입력 8,688 출력 1,999 토큰
+2026-09-04 23:30:37,945 INFO 후보: ['MU', 'CPRT', 'CDW', 'GILD', 'VRTX']
+2026-09-04 23:30:41,922 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-04 23:30:41,923 INFO Claude 호출: 입력 21,519 출력 218 토큰
+2026-09-04 23:30:41,923 INFO 판단 CPRT: buy 55% — 20일 수익률 +13%로 중간 모멘텀 구간 유지, 일봉 SMA10>SMA20>SMA50 정배열과 MACD 양전환 지속. 8/19~21 급등 후 
+2026-09-04 23:30:43,341 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-04 23:30:43,342 INFO Claude 호출: 입력 21,540 출력 244 토큰
+2026-09-04 23:30:43,343 INFO 판단 MU: buy 65% — 20일 수익률 +13.79%로 중 모멘텀 구간 유지, MACD는 8월 중순 골든크로스 이후 양전 지속되며 신고가(998.56) 경신 중. 시간봉
+2026-09-04 23:30:44,153 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-04 23:30:44,154 INFO Claude 호출: 입력 18,797 출력 236 토큰
+2026-09-04 23:30:44,154 INFO 판단 CDW: buy 55% — 20일 수익률 +13.1%로 중간 모멘텀 구간 유지, 백테스트상 우호적 구간이다. 일봉 SMA10>20>50 정배열이 지속되고 MACD 3.84
+2026-09-04 23:30:46,622 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-04 23:30:46,623 INFO Claude 호출: 입력 21,135 출력 213 토큰
+2026-09-04 23:30:46,623 INFO 판단 GILD: buy 60% — 20일 +12.7%로 중간 모멘텀 구간 유지, 일봉 SMA10>20>50 정배열과 MACD 플러스로 60일 추세 견조. RSI·볼린저 상단권 과
+2026-09-04 23:30:48,199 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-04 23:30:48,201 INFO Claude 호출: 입력 19,898 출력 238 토큰
+2026-09-04 23:30:48,201 INFO 판단 VRTX: buy 55% — 20일 수익률 +11.1%로 중 모멘텀 구간 유지, 일봉 SMA10/20/50 정배열에 MACD 양전 지속. RSI 63선으로 과열권이나 검증된
+2026-09-04 23:30:49,573 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-04 23:30:49,575 INFO Claude 호출: 입력 23,925 출력 185 토큰
+2026-09-04 23:30:49,575 INFO 판단 SMCI: hold 0% — 20일 수익률 +26.44%로 강 모멘텀 구간이 유지되고 있으며 보유 손익도 +3.67%로 양호하다. 일봉 SMA_10/20/50 정배열과 MA
+2026-09-04 23:30:51,885 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-04 23:30:51,886 INFO Claude 호출: 입력 24,197 출력 228 토큰
+2026-09-04 23:30:51,887 INFO 판단 MSTR: hold 0% — 20일 수익률 +40.16%로 강 모멘텀 구간 유지, 일봉 SMA10>20>50 정배열에 MACD도 시그널선 위에서 유지되며 뉴스 악재 없음. 
+2026-09-04 23:30:52,996 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-04 23:30:52,997 INFO Claude 호출: 입력 23,974 출력 235 토큰
+2026-09-04 23:30:52,998 INFO 판단 TEAM: hold 0% — 20일 수익률 +29.58%로 강모멘텀 구간이 유지되고 있어 백테스트상 매도 근거가 되지 않는다. 일봉은 SMA10>20>50 정배열을 유지하며
+2026-09-04 23:30:54,783 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-04 23:30:54,784 INFO Claude 호출: 입력 23,952 출력 247 토큰
+2026-09-04 23:30:54,785 INFO 판단 WDAY: hold 0% — 20일 수익률 +11.47%로 중 모멘텀 구간을 여전히 유지 중이라 기본은 보유다. 일봉 MACD 히스토그램은 마이너스 지속이고 시간봉도 RSI
+2026-09-04 23:30:55,932 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-04 23:30:55,933 INFO Claude 호출: 입력 22,474 출력 234 토큰
+2026-09-04 23:30:55,933 INFO 판단 KDP: hold 0% — 20일 수익률 +9.13%로 양수 모멘텀이 유지되고 있고, 일봉 MACD(0.48)가 시그널(0.35) 위 정배열이며 종가는 SMA10·SMA2
+2026-09-04 23:31:06,298 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-04 23:31:06,300 INFO Claude 호출: 입력 5,500 출력 745 토큰
+2026-09-04 23:31:06,300 INFO 배분 요약: 현재 보유 5종목(SMCI, MSTR, TEAM, WDAY, KDP)이 모두 hold 판단이며 20일 수익률이 전부 양수(9~40%)로 매도 사유가 없어 최대 보유 종목 수(5) 슬롯이 이미 가득 찼다. CPRT, MU, CDW, GILD, VRTX는 모멘텀 구간상 매수 대상이나 자리를 낼 보유 종목이 없어 이번 사이클은 전량 보류한다. 특정 종목의 실적 이벤트나 규제 리스크 때문이 아니라 순수히 슬롯 부족으로 인한 거부이며, 보유 종목 중 하나가 모멘텀을 잃거나 매도 신호가 뜨면 다음 사이클에 재평가한다.
+2026-09-04 23:31:06,301 INFO === run 30 완료: 주문 0건, 제외 0건 ===
+2026-09-04 23:31:06,303 INFO 토큰: Claude 12회, 입력 235,599, 출력 5,022, 추정 $0.5214 (claude/claude-sonnet-5 API 단가 기준)
+2026-09-05 00:00:00,235 INFO === run 31 시작 (실주문, claude/claude-sonnet-5) ===
+2026-09-05 00:00:00,489 INFO 계좌: 현금 $121.43 총자산 $609.51 보유 ['SMCI', 'MSTR', 'TEAM', 'WDAY', 'KDP']
+2026-09-05 00:00:12,094 INFO 스크리닝 101종목, 20일 수익률 상위: [('MRNA', 140.65), ('MSTR', 38.93), ('TEAM', 28.6), ('SMCI', 26.18), ('MU', 14.06), ('GILD', 12.63), ('CPRT', 12.49), ('CDW', 12.47)]
+2026-09-05 00:00:49,247 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-05 00:00:49,248 INFO Claude 호출: 입력 8,689 출력 3,007 토큰
+2026-09-05 00:00:49,248 INFO 후보: ['MU', 'GILD', 'CPRT', 'CDW', 'VRTX']
+2026-09-05 00:00:53,772 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-05 00:00:53,775 INFO Claude 호출: 입력 21,470 출력 213 토큰
+2026-09-05 00:00:53,775 INFO 판단 GILD: buy 60% — 20일 +12.7%로 중간 모멘텀 구간 유지, 일봉 SMA10>20>50 정배열과 MACD 플러스로 추세 견조. RSI·볼린저 상단권 과열은 백
+2026-09-05 00:00:54,281 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-05 00:00:54,282 INFO Claude 호출: 입력 21,835 출력 259 토큰
+2026-09-05 00:00:54,282 INFO 판단 CPRT: buy 55% — 20일 수익률 +12.56%로 중 모멘텀 구간 유지, 일봉 SMA10>SMA20>SMA50 정배열과 MACD 양전환이 이어지며 8/19~21 급
+2026-09-05 00:00:54,737 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-05 00:00:54,738 INFO Claude 호출: 입력 21,990 출력 256 토큰
+2026-09-05 00:00:54,739 INFO 판단 MU: buy 65% — 20일 수익률 +14.25%로 중 모멘텀 구간 유지, MACD 골든크로스 이후 양전 지속되며 신고가(1002.6) 경신 중. 시간봉 RSI 73
+2026-09-05 00:00:58,370 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-05 00:00:58,371 INFO Claude 호출: 입력 20,247 출력 239 토큰
+2026-09-05 00:00:58,372 INFO 판단 VRTX: buy 55% — 20일 수익률 +11.1%로 중 모멘텀 구간 지속, 일봉 SMA10/20/50 정배열과 MACD 양전 유지. RSI 62선은 과열권이나 검증된 
+2026-09-05 00:00:59,323 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-05 00:00:59,325 INFO Claude 호출: 입력 18,878 출력 261 토큰
+2026-09-05 00:00:59,325 INFO 판단 CDW: buy 55% — 20일 수익률 +12.57%로 중간 모멘텀 구간 유지, 백테스트상 우호적 구간이다. 일봉 SMA10>20>50 정배열 지속, MACD 3.78이
+2026-09-05 00:00:59,932 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-05 00:00:59,932 INFO Claude 호출: 입력 23,947 출력 198 토큰
+2026-09-05 00:00:59,932 INFO 판단 SMCI: hold 0% — 20일 수익률 +26.47%로 강 모멘텀 구간이 여전히 유지되고 있고 보유 손익도 +3.04%로 양호하다. 일봉 SMA_10/20/50 정배열과
+2026-09-05 00:01:05,190 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-05 00:01:05,192 INFO Claude 호출: 입력 24,001 출력 246 토큰
+2026-09-05 00:01:05,192 INFO 판단 WDAY: hold 0% — 20일 수익률 +10.74%로 아직 중 모멘텀 구간을 유지하고 있어 추세가 완전히 꺾인 것은 아니다. 다만 일봉 MACD 히스토그램 마이너스 지
+2026-09-05 00:01:05,421 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-05 00:01:05,422 INFO Claude 호출: 입력 24,160 출력 257 토큰
+2026-09-05 00:01:05,422 INFO 판단 MSTR: hold 0% — 20일 수익률 +38.68%로 여전히 강 모멘텀 구간이며, 일봉 SMA10>20>50 정배열과 MACD 시그널선 위 유지가 지속되고 뉴스 악재도
+2026-09-05 00:01:05,442 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-05 00:01:05,443 INFO Claude 호출: 입력 24,015 출력 226 토큰
+2026-09-05 00:01:05,443 INFO 판단 TEAM: hold 0% — 20일 수익률 +28.55%로 강모멘텀 구간이 여전히 유지되고 있어 백테스트상 매도 근거가 되지 않는다. 일봉은 SMA10>20>50 정배열을 
+2026-09-05 00:01:09,327 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-05 00:01:09,329 INFO Claude 호출: 입력 22,524 출력 236 토큰
+2026-09-05 00:01:09,330 INFO 판단 KDP: hold 0% — 20일 수익률 +9.25%로 여전히 양수 모멘텀이 유지되고 있고, 일봉 MACD(0.49)가 시그널(0.35) 위 정배열이며 종가는 SMA10·
+2026-09-05 00:01:17,854 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-05 00:01:17,855 INFO Claude 호출: 입력 5,614 출력 638 토큰
+2026-09-05 00:01:17,855 INFO 배분 요약: 현재 보유 종목이 SMCI, MSTR, TEAM, WDAY, KDP로 최대 보유 한도(5종목)를 이미 채운 상태이며, 모든 보유 종목의 판단이 hold이고 sell 신호가 없어 매도할 대상이 없다. WDAY가 단기 조정 압력을 보이나 20일 수익률이 여전히 +10%대 중모멘텀 구간이라 매도 사유로는 부족해 보유 유지한다. GILD, CPRT, MU, VRTX, CDW는 모멘텀 구간상 매수 후보이나 빈 자리가 없어 이번 사이클은 전량 거부한다. 다음 사이클에서 보유 종목의 모멘텀 소멸이 확인되면 재평가한다.
+2026-09-05 00:01:17,857 INFO === run 31 완료: 주문 0건, 제외 0건 ===
+2026-09-05 00:01:17,858 INFO 토큰: Claude 12회, 입력 237,370, 출력 6,036, 추정 $0.5351 (claude/claude-sonnet-5 API 단가 기준)
+2026-09-05 02:00:00,147 INFO === run 32 시작 (실주문, claude/claude-sonnet-5) ===
+2026-09-05 02:00:00,485 INFO 계좌: 현금 $121.43 총자산 $618.01 보유 ['SMCI', 'MSTR', 'TEAM', 'WDAY', 'KDP']
+2026-09-05 02:00:10,947 INFO 스크리닝 101종목, 20일 수익률 상위: [('MRNA', 145.94), ('MSTR', 43.04), ('SMCI', 30.58), ('TEAM', 27.4), ('MU', 14.6), ('CPRT', 13.91), ('GILD', 13.26), ('CDW', 13.17)]
+2026-09-05 02:00:32,217 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-05 02:00:32,219 INFO Claude 호출: 입력 8,690 출력 1,741 토큰
+2026-09-05 02:00:32,219 INFO 후보: ['MU', 'CPRT', 'GILD', 'CDW', 'VRTX']
+2026-09-05 02:00:36,757 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-05 02:00:36,761 INFO Claude 호출: 입력 22,275 출력 253 토큰
+2026-09-05 02:00:36,761 INFO 판단 CPRT: buy 55% — 20일 수익률 +13.89%로 중 모멘텀 구간 유지, 일봉 SMA10>SMA20>SMA50 정배열과 MACD 양전환 지속. 8/19~21 급등 
+2026-09-05 02:00:36,953 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-05 02:00:36,954 INFO Claude 호출: 입력 21,828 출력 228 토큰
+2026-09-05 02:00:36,954 INFO 판단 GILD: buy 60% — 20일 +13.1%로 중간 모멘텀 구간 유지, 일봉 SMA10>20>50 정배열과 MACD 플러스로 60일 추세도 견조하다. RSI·볼린저 상단
+2026-09-05 02:00:37,175 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-05 02:00:37,176 INFO Claude 호출: 입력 22,213 출력 239 토큰
+2026-09-05 02:00:37,176 INFO 판단 MU: buy 65% — 20일 수익률 +14.52%로 중 모멘텀 구간 지속, MACD 양전 유지되며 신고가 1005 경신 중. 일봉 RSI 59, 시간봉 RSI 67대
+2026-09-05 02:00:40,861 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-05 02:00:40,862 INFO Claude 호출: 입력 20,640 출력 215 토큰
+2026-09-05 02:00:40,863 INFO 판단 VRTX: buy 55% — 20일 수익률 +10.9%로 중 모멘텀 구간 유지, 일봉 SMA10/20/50 정배열과 MACD 양전 지속. 시간봉은 22시 이후 RSI 34까
+2026-09-05 02:00:41,957 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-05 02:00:41,958 INFO Claude 호출: 입력 24,010 출력 206 토큰
+2026-09-05 02:00:41,959 INFO 판단 SMCI: hold 0% — 20일 수익률 +30.52%로 강 모멘텀 구간이 지속되고 있고 보유 손익도 +6.72%로 양호하다. 일봉 SMA_10/20/50 정배열, MAC
+2026-09-05 02:00:42,053 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-05 02:00:42,054 INFO Claude 호출: 입력 21,755 출력 234 토큰
+2026-09-05 02:00:42,054 INFO 판단 CDW: buy 55% — 20일 수익률 +13.17%로 중간 모멘텀 구간이며 백테스트상 우호적 구간이다. 일봉 SMA10>SMA20>SMA50 정배열 유지, MACD 3
+2026-09-05 02:00:46,350 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-05 02:00:46,354 INFO Claude 호출: 입력 24,129 출력 221 토큰
+2026-09-05 02:00:46,354 INFO 판단 TEAM: hold 0% — 20일 수익률 +27.46%로 강모멘텀 구간이 유지되고 있어 백테스트상 매도 근거가 되지 않는다. 일봉 SMA10>20>50 정배열은 유지되나 
+2026-09-05 02:00:46,595 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-05 02:00:46,596 INFO Claude 호출: 입력 24,166 출력 233 토큰
+2026-09-05 02:00:46,596 INFO 판단 MSTR: hold 0% — 20일 수익률 +43.02%로 강 모멘텀 최상위 구간 유지, 일봉 SMA10>20>50 정배열에 MACD도 시그널선 위에서 확산 중이며 뉴스 악
+2026-09-05 02:00:47,110 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-05 02:00:47,113 INFO Claude 호출: 입력 24,095 출력 253 토큰
+2026-09-05 02:00:47,114 INFO 판단 WDAY: hold 0% — 20일 수익률 +10.1%로 아직 중 모멘텀 구간을 유지하고 있어 추세가 완전히 꺾이지는 않았다. 다만 일봉 MACD 히스토그램 마이너스 지속에
+2026-09-05 02:00:50,422 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-05 02:00:50,423 INFO Claude 호출: 입력 22,628 출력 242 토큰
+2026-09-05 02:00:50,423 INFO 판단 KDP: hold 0% — 20일 수익률 +8.88%로 여전히 양수 모멘텀이 유지되고, 일봉 MACD(0.48)가 시그널(0.35) 위 정배열이며 종가는 SMA10·SMA
+2026-09-05 02:01:00,898 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-05 02:01:00,899 INFO Claude 호출: 입력 5,539 출력 848 토큰
+2026-09-05 02:01:00,900 INFO 배분 요약: 현재 5종목(SMCI, MSTR, TEAM, WDAY, KDP)을 모두 보유 중이며 최대 보유 종목 수 5에 도달했다. 전 종목 판단이 hold이고 20일 수익률도 모두 양수(SMCI +30.5%, MSTR +43.0%, TEAM +27.5%, WDAY +10.1%, KDP +8.9%)로 모멘텀 소멸이 확인되지 않아 자리를 비울 이유가 없다. 따라서 CPRT, GILD, MU, VRTX, CDW 등 신규 buy 판단 종목들은 모멘텀 구간이 양호함에도 불구하고 빈 자리가 없어 이번 사이클에서는 승인하지 않는다. 매도할 종목이 없으므로 이번 배분은 주문 없이 보유 유지로 마무리한다.
+2026-09-05 02:01:00,901 INFO === run 32 완료: 주문 0건, 제외 0건 ===
+2026-09-05 02:01:00,902 INFO 토큰: Claude 12회, 입력 241,968, 출력 4,913, 추정 $0.5331 (claude/claude-sonnet-5 API 단가 기준)
+2026-09-05 04:00:00,585 INFO === run 33 시작 (실주문, claude/claude-sonnet-5) ===
+2026-09-05 04:00:00,919 INFO 계좌: 현금 $121.43 총자산 $615.24 보유 ['SMCI', 'MSTR', 'TEAM', 'WDAY', 'KDP']
+2026-09-05 04:00:09,279 INFO 스크리닝 101종목, 20일 수익률 상위: [('MRNA', 146.74), ('MSTR', 43.43), ('SMCI', 28.01), ('TEAM', 27.24), ('MU', 14.52), ('CPRT', 14.04), ('GILD', 12.96), ('CDW', 12.31)]
+2026-09-05 04:00:33,880 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-05 04:00:33,881 INFO Claude 호출: 입력 8,691 출력 1,842 토큰
+2026-09-05 04:00:33,881 INFO 후보: ['MRNA', 'MU', 'CPRT', 'GILD', 'CDW']
+2026-09-05 04:00:40,223 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-05 04:00:40,225 INFO Claude 호출: 입력 22,684 출력 272 토큰
+2026-09-05 04:00:40,225 INFO 판단 CPRT: buy 55% — 20일 수익률 +14.0%로 중 모멘텀 구간 유지, 일봉 SMA10>SMA20>SMA50 정배열과 MACD 양전환이 이어지며 8/19~21 급등
+2026-09-05 04:00:41,278 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-05 04:00:41,279 INFO Claude 호출: 입력 22,542 출력 246 토큰
+2026-09-05 04:00:41,280 INFO 판단 MU: buy 65% — 20일 수익률 +14.5%로 중간 모멘텀 구간 유지, MACD 양전 지속되며 신고가 1005 부근 경신 중. 시간봉 RSI 70대, 스토캐스틱 
+2026-09-05 04:00:41,436 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-05 04:00:41,437 INFO Claude 호출: 입력 21,952 출력 253 토큰
+2026-09-05 04:00:41,438 INFO 판단 MRNA: buy 45% — 20일 +146.79%로 강 모멘텀 구간 유지, 검증된 통계상 이 구간은 이후 20일도 초과수익 경향을 보인다. 8/19 갭업 이후 176→13
+2026-09-05 04:00:45,668 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-05 04:00:45,671 INFO Claude 호출: 입력 23,254 출력 222 토큰
+2026-09-05 04:00:45,672 INFO 판단 GILD: buy 60% — 20일 +12.9%로 중간 모멘텀 구간 유지, 일봉 SMA10>20>50 정배열과 MACD 플러스로 60일 추세도 견조하다. RSI·볼린저 상단
+2026-09-05 04:00:48,212 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-05 04:00:48,213 INFO Claude 호출: 입력 22,233 출력 222 토큰
+2026-09-05 04:00:48,213 INFO 판단 CDW: buy 55% — 20일 수익률 +12.3%로 중간 모멘텀 구간에 위치, 백테스트상 우호적 구간이다. 일봉 SMA10>20>50 정배열 유지, MACD 3.75가
+2026-09-05 04:00:48,347 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-05 04:00:48,348 INFO Claude 호출: 입력 24,045 출력 204 토큰
+2026-09-05 04:00:48,349 INFO 판단 SMCI: hold 0% — 20일 수익률 +27.75%로 강 모멘텀 구간이 유지되고 있고 보유 손익도 +4.56%로 양호하다. 일봉 SMA_10/20/50 정배열, MAC
+2026-09-05 04:00:51,629 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-05 04:00:51,631 INFO Claude 호출: 입력 24,144 출력 212 토큰
+2026-09-05 04:00:51,631 INFO 판단 MSTR: hold 0% — 20일 수익률 +43.35%로 강 모멘텀 최상위 구간 유지, 일봉 SMA10>20>50 정배열과 MACD 시그널선 위 확산 지속되며 뉴스 악재 
+2026-09-05 04:00:53,332 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-05 04:00:53,334 INFO Claude 호출: 입력 24,211 출력 237 토큰
+2026-09-05 04:00:53,334 INFO 판단 TEAM: hold 0% — 20일 수익률 +27.18%로 강모멘텀 구간이 여전히 유지되고 있어 백테스트상 매도 근거가 되지 않는다. 일봉은 SMA10>20>50 정배열을 
+2026-09-05 04:00:54,857 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-05 04:00:54,859 INFO Claude 호출: 입력 24,209 출력 285 토큰
+2026-09-05 04:00:54,859 INFO 판단 WDAY: hold 0% — 20일 수익률 +10.36%로 여전히 중 모멘텀 구간을 유지하고 있어 추세 자체가 완전히 꺾인 것은 아니다. 다만 일봉 MACD 히스토그램이 마
+2026-09-05 04:00:56,802 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-05 04:00:56,803 INFO Claude 호출: 입력 22,735 출력 246 토큰
+2026-09-05 04:00:56,804 INFO 판단 KDP: hold 0% — 20일 수익률 +8.7%로 여전히 양수 모멘텀을 유지하고 있고, 일봉 MACD(0.47)가 시그널(0.35) 위 정배열이며 종가는 SMA10·S
+2026-09-05 04:01:17,041 INFO HTTP Request: POST http://localhost:20128/v1/messages "HTTP/1.1 200 OK"
+2026-09-05 04:01:17,042 INFO Claude 호출: 입력 5,623 출력 1,464 토큰
+2026-09-05 04:01:17,042 INFO 배분 요약: 보유 5종목(SMCI, MSTR, TEAM, WDAY, KDP)이 모두 hold 판단이며 20일 수익률이 전부 양수(+8.7%~+43.35%)로 매도 트리거(음수 전환)가 발생하지 않아 매도 없음. 최대 보유 종목 수(5)가 이미 꽉 차 있어 CPRT, MU, MRNA, GILD, CDW 등 신규 buy 후보들은 모멘텀 순위와 무관하게 자리가 없어 이번 사이클은 전부 보류. 특정 종목의 정성적 악재(실적/소송/규제 등)는 없으므로 향후 보유 종목 중 모멘텀이 음전환되면 그때 교체 매매를 검토한다.
+2026-09-05 04:01:17,043 INFO === run 33 완료: 주문 0건, 제외 0건 ===
+2026-09-05 04:01:17,044 INFO 토큰: Claude 12회, 입력 246,323, 출력 5,705, 추정 $0.5497 (claude/claude-sonnet-5 API 단가 기준)
+2026-09-05 12:03:02,322 INFO === run 34 시작 (실주문, claude/claude-sonnet-5) ===
+2026-09-05 12:03:02,380 INFO 장 마감 후 (마감 05:00 KST) — 건너뜀 (강제 실행은 --force 또는 대시보드 1회 실행)
+2026-09-05 12:03:02,384 INFO 토큰: Claude 0회, 입력 0, 출력 0, 추정 $0.0000 (claude/claude-sonnet-5 API 단가 기준)
+2026-09-05 22:01:38,542 INFO === run 35 시작 (실주문, claude/claude-sonnet-5) ===
+2026-09-05 22:01:38,665 ERROR run 35 실패: 403 ip-not-allowed: 허용되지 않은 IP 주소입니다.
+Traceback (most recent call last):
+  File "/Users/ryan/quant_new/autotrade.py", line 607, in run_cycle
+    session = market_session(toss)
+              ^^^^^^^^^^^^^^^^^^^^
+  File "/Users/ryan/quant_new/autotrade.py", line 247, in market_session
+    day = (toss.us_market_calendar(date=us_today) or {}).get("today") or {}
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/ryan/quant_new/toss.py", line 152, in us_market_calendar
+    return self._call("GET", "/api/v1/market-calendar/US", params={"date": date})
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/ryan/quant_new/toss.py", line 126, in _call
+    raise TossError(r.status_code, err.get("code"), err.get("message"), err.get("data"))
+toss.TossError: 403 ip-not-allowed: 허용되지 않은 IP 주소입니다.
+2026-09-05 22:01:38,670 INFO 토큰: Claude 0회, 입력 0, 출력 0, 추정 $0.0000 (claude/claude-sonnet-5 API 단가 기준)

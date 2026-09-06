@@ -1,2 +1,0 @@
-{"track": "week", "label": "주간", "action": "HOLD", "ticker": "SBUX", "date": "2026-09-02", "horizon_days": 5, "p_up": 0.5408, "live": false, "ts": 1788364777.62066}
-{"track": "month", "label": "월간", "action": "HOLD", "ticker": "SBUX", "date": "2026-09-02", "horizon_days": 21, "p_up": 0.5734, "live": false, "ts": 1788364777.6212559}

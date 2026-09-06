@@ -1,7 +1,0 @@
-.git
-.claude
-models_cache
-__pycache__
-**/__pycache__
-*.pyc
-*.py.bak

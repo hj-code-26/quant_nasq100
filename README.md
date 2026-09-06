@@ -50,14 +50,29 @@ Claude 가 낸 주문은 반드시 코드의 규칙 검증을 거친다. 규칙�
 
 ## 실행
 
+처음이면 `make install` 후 `cp .env.example .env` 로 키를 넣는다. 그 다음은 `make` 한 줄이면 된다.
+
 ```bash
-pip install -r requirements.txt
-cp .env.example .env      # 키 입력
-python toss.py            # 토스 연결 확인 (읽기 전용) → accountSeq 를 .env 에
+make            # 웹 대시보드 실행 + 브라우저 열기 → http://127.0.0.1:8877
+make help       # 전체 명령 보기
+```
+
+| 명령 | 하는 일 |
+|---|---|
+| `make` | 웹 대시보드 (FastAPI). 이미 떠 있으면 브라우저만 연다 |
+| `make dash` | Streamlit 대시보드 → http://127.0.0.1:8501 |
+| `make once` | 1회 모의 실행 (`DRY_RUN=1` 강제, 주문 안 나감) |
+| `make live` | 1회 실주문 — 확인 문구 「실주문」 을 입력해야 진행 |
+| `make status` / `make stop` / `make logs` | 상태 · 종료 · 로그 |
+| `make check` | 토스 연결 확인 (읽기 전용) |
+| `make eval` / `make backtest` | 판단 성적표 · 선별 규칙 백테스트 |
+
+직접 실행할 때는:
+
+```bash
+python toss.py               # 토스 연결 확인 (읽기 전용) → accountSeq 를 .env 에
 python autotrade.py --once   # 1회 실행 (DRY_RUN=1 이면 주문 없음)
 python autotrade.py          # 즉시 1회 + TRADE_TIMES 마다 반복
-streamlit run streamlit_app.py   # 대시보드 (Streamlit)
-python autotrade_server.py       # 웹 대시보드 → http://127.0.0.1:8877
 ```
 
 `DRY_RUN=1`(기본) 이면 스크리닝·판단·배분·검증까지 다 하고 주문만 내지 않는다. 실주문은 `DRY_RUN=0`.
