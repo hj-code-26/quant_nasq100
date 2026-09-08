@@ -1054,3 +1054,42 @@ Traceback (most recent call last):
     raise TossError(r.status_code, err.get("code"), err.get("message"), err.get("data"))
 toss.TossError: 403 ip-not-allowed: 허용되지 않은 IP 주소입니다.
 2026-09-05 22:01:38,670 INFO 토큰: Claude 0회, 입력 0, 출력 0, 추정 $0.0000 (claude/claude-sonnet-5 API 단가 기준)
+2026-09-07 01:06:05,265 INFO === run 36 시작 (실주문, claude/claude-sonnet-5) ===
+2026-09-07 01:06:05,551 INFO 휴장일 — 건너뜀 (강제 실행은 --force 또는 대시보드 1회 실행)
+2026-09-07 01:06:05,555 INFO 토큰: Claude 0회, 입력 0, 출력 0, 추정 $0.0000 (claude/claude-sonnet-5 API 단가 기준)
+2026-09-07 02:00:00,519 INFO === run 37 시작 (실주문, claude/claude-sonnet-5) ===
+2026-09-07 02:00:00,631 INFO 휴장일 — 건너뜀 (강제 실행은 --force 또는 대시보드 1회 실행)
+2026-09-07 02:00:00,634 INFO 토큰: Claude 0회, 입력 0, 출력 0, 추정 $0.0000 (claude/claude-sonnet-5 API 단가 기준)
+2026-09-07 04:00:00,100 INFO === run 38 시작 (실주문, claude/claude-sonnet-5) ===
+2026-09-07 04:00:00,214 INFO 휴장일 — 건너뜀 (강제 실행은 --force 또는 대시보드 1회 실행)
+2026-09-07 04:00:00,217 INFO 토큰: Claude 0회, 입력 0, 출력 0, 추정 $0.0000 (claude/claude-sonnet-5 API 단가 기준)
+2026-09-07 22:38:55,996 INFO === run 39 시작 (DRY_RUN, claude/claude-sonnet-5) ===
+2026-09-07 22:38:56,129 INFO 휴장일 — 건너뜀 (강제 실행은 --force 또는 대시보드 1회 실행)
+2026-09-07 22:38:56,132 INFO 토큰: Claude 0회, 입력 0, 출력 0, 추정 $0.0000 (claude/claude-sonnet-5 API 단가 기준)
+2026-09-07 22:39:02,505 INFO === run 40 시작 (DRY_RUN, claude/claude-sonnet-5) ===
+2026-09-07 22:39:02,583 INFO 휴장일 — 건너뜀 (강제 실행은 --force 또는 대시보드 1회 실행)
+2026-09-07 22:39:02,586 INFO 토큰: Claude 0회, 입력 0, 출력 0, 추정 $0.0000 (claude/claude-sonnet-5 API 단가 기준)
+2026-09-07 22:39:15,369 INFO === run 41 시작 (실주문, claude/claude-sonnet-5) ===
+2026-09-07 22:39:15,609 INFO 휴장일 — 건너뜀 (강제 실행은 --force 또는 대시보드 1회 실행)
+2026-09-07 22:39:15,612 INFO 토큰: Claude 0회, 입력 0, 출력 0, 추정 $0.0000 (claude/claude-sonnet-5 API 단가 기준)
+2026-09-08 14:41:49,261 INFO === run 42 시작 (DRY_RUN, claude/claude-sonnet-5) ===
+2026-09-08 14:41:49,550 ERROR run 42 실패: 403 Client Error: Forbidden for url: https://openapi.tossinvest.com/oauth2/token
+Traceback (most recent call last):
+  File "/Users/ryan/quant_new/autotrade.py", line 607, in run_cycle
+    session = market_session(toss)
+              ^^^^^^^^^^^^^^^^^^^^
+  File "/Users/ryan/quant_new/autotrade.py", line 247, in market_session
+    day = (toss.us_market_calendar(date=us_today) or {}).get("today") or {}
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/ryan/quant_new/toss.py", line 152, in us_market_calendar
+    return self._call("GET", "/api/v1/market-calendar/US", params={"date": date})
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/ryan/quant_new/toss.py", line 98, in _call
+    headers = {"Authorization": f"Bearer {self._access_token()}"}
+                                          ^^^^^^^^^^^^^^^^^^^^
+  File "/Users/ryan/quant_new/toss.py", line 83, in _access_token
+    r.raise_for_status()
+  File "/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/site-packages/requests/models.py", line 1167, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 403 Client Error: Forbidden for url: https://openapi.tossinvest.com/oauth2/token
+2026-09-08 14:41:49,555 INFO 토큰: Claude 0회, 입력 0, 출력 0, 추정 $0.0000 (claude/claude-sonnet-5 API 단가 기준)
