@@ -1,7 +1,6 @@
 anthropic
 requests
 pandas
-pandas_ta
 numpy
 schedule
 streamlit

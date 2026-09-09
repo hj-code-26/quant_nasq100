@@ -25,7 +25,6 @@ import zoneinfo
 
 import anthropic
 import pandas as pd
-import pandas_ta as ta
 import requests
 import schedule
 
@@ -44,10 +43,15 @@ PRICES = {"fable": (10, 50), "opus": (5, 25), "sonnet": (2, 10), "haiku": (1, 5)
 BASE_URL = os.environ.get("ANTHROPIC_BASE_URL") or "https://api.anthropic.com"
 GATEWAY = "api.anthropic.com" not in BASE_URL             # OmniRoute 등 게이트웨이 경유 여부
 DRY_RUN = os.environ.get("DRY_RUN", "1") == "1"           # 기본은 모의. 실주문은 DRY_RUN=0
-# 실행 시각 (KST): 개장 22:30 → 1시간 뒤 23:30 → 00:00 부터 2시간 간격. 정규장 종료(05:00/06:00) 1시간 전까지.
-# 겨울(서머타임 해제)엔 개장이 23:30 이라 22:30 실행은 "장 시작 전"으로 자동 건너뛴다.
+# 실행 시각 (KST): 프리장 개장 17:00 → 정규장 개장 22:30 → 1시간 뒤 23:30 → 00:00 부터 2시간 간격
+# → 정규장 마감(05:00) 뒤 애프터장 06:00·08:00.
+# 겨울(서머타임 해제)엔 한 시간씩 밀려서 앞선 실행은 "장 시작 전", 마지막은 "장 마감 후"로 자동 건너뛴다.
 TRADE_TIMES = [t.strip() for t in
-               os.environ.get("TRADE_TIMES", "22:30,23:30,00:00,02:00,04:00").split(",")]
+               os.environ.get("TRADE_TIMES",
+                              "17:00,22:30,23:30,00:00,02:00,04:00,06:00,08:00").split(",")]
+PREMARKET = os.environ.get("PREMARKET", "1") == "1"       # 프리장(17:00~22:30 KST)에도 주문할지
+AFTERMARKET = os.environ.get("AFTERMARKET", "1") == "1"   # 애프터장(05:00~09:00 KST)에도 주문할지
+PREMARKET_SLIP = float(os.environ.get("PREMARKET_SLIP", 0.5))  # 장외 지정가 버퍼 %
 
 SCREEN_N = int(os.environ.get("SCREEN_N", 40))            # 규칙 점수 상위 몇 개를 Claude 에 보여줄지
 TOP_N = int(os.environ.get("TOP_N", 5))                   # Claude 가 고르는 후보 수
@@ -55,8 +59,11 @@ MAX_POSITIONS = int(os.environ.get("MAX_POSITIONS", 5))   # 동시 보유 최대
 MAX_POSITION_PCT = float(os.environ.get("MAX_POSITION_PCT", 30))   # 종목당 최대 비중 (총자산 대비 %)
 CASH_RESERVE_PCT = float(os.environ.get("CASH_RESERVE_PCT", 10))   # 항상 남겨둘 현금 비중 (%)
 MIN_ORDER_USD = float(os.environ.get("MIN_ORDER_USD", 5))
+STOP_LOSS_PCT = float(os.environ.get("STOP_LOSS_PCT", 25))   # 평단 대비 -N% 면 전량 매도 (0 이면 끔)
+MOMENTUM_EXIT = os.environ.get("MOMENTUM_EXIT", "1") == "1"  # 20일 수익률이 음수로 꺾이면 전량 매도
 WORKERS = int(os.environ.get("WORKERS", 3))               # 종목별 판단 병렬 수 (Claude 속도 제한 고려)
 
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")   # 윈도우 콘솔(cp949)에서 한글 로그가 깨지지 않게
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
     handlers=[logging.StreamHandler(sys.stdout),
@@ -171,17 +178,35 @@ def candles(toss, symbol, interval, count):
     return df[["open", "high", "low", "close", "volume"]].astype(float)
 
 
+def _rma(s, n):
+    """Wilder 평활 (RSI 용)."""
+    return s.ewm(alpha=1 / n, adjust=False).mean()
+
+
 def add_indicators(df):
     """SMA10/20/50, EMA10, RSI14, 스토캐스틱(14,3,3), MACD(12,26,9), 볼린저(20,2).
-    봉이 모자라 pandas_ta 가 None 을 주는 지표는 뺀다."""
+    컬럼명은 pandas_ta 판본과 동일하게 유지한다 (pandas_ta 는 py3.12+ 전용이라 직접 계산)."""
+    c, h, l = df["close"], df["high"], df["low"]
     for n in (10, 20, 50):
-        df[f"SMA_{n}"] = ta.sma(df["close"], length=n)
-    df["EMA_10"] = ta.ema(df["close"], length=10)
-    df["RSI_14"] = ta.rsi(df["close"], length=14)
-    extra = [ta.stoch(df["high"], df["low"], df["close"], k=14, d=3, smooth_k=3),
-             ta.macd(df["close"], fast=12, slow=26, signal=9),
-             ta.bbands(df["close"], length=20, std=2)]
-    return pd.concat([df] + [x for x in extra if x is not None], axis=1)
+        df[f"SMA_{n}"] = c.rolling(n).mean()
+    df["EMA_10"] = c.ewm(span=10, adjust=False).mean()
+
+    d = c.diff()
+    df["RSI_14"] = 100 - 100 / (1 + _rma(d.clip(lower=0), 14) / _rma(-d.clip(upper=0), 14))
+
+    ll, hh = l.rolling(14).min(), h.rolling(14).max()
+    df["STOCHk_14_3_3"] = (100 * (c - ll) / (hh - ll)).rolling(3).mean()
+    df["STOCHd_14_3_3"] = df["STOCHk_14_3_3"].rolling(3).mean()
+
+    macd = c.ewm(span=12, adjust=False).mean() - c.ewm(span=26, adjust=False).mean()
+    sig = macd.ewm(span=9, adjust=False).mean()
+    df["MACD_12_26_9"], df["MACDs_12_26_9"], df["MACDh_12_26_9"] = macd, sig, macd - sig
+
+    mid, sd = c.rolling(20).mean(), c.rolling(20).std(ddof=1)
+    lower, upper = mid - 2 * sd, mid + 2 * sd
+    df["BBL_20_2.0_2.0"], df["BBM_20_2.0_2.0"], df["BBU_20_2.0_2.0"] = lower, mid, upper
+    df["BBP_20_2.0_2.0"] = (c - lower) / (upper - lower)
+    return df
 
 
 def records(df, fmt):
@@ -242,14 +267,20 @@ def account_state(toss):
 
 
 def market_session(toss):
-    """오늘(미국 날짜) 정규장 (시작, 종료) KST. 휴장이면 None."""
+    """오늘(미국 날짜) 거래 가능 구간 (거래 시작, 정규장 시작, 정규장 종료, 거래 종료) KST. 휴장이면 None.
+    PREMARKET 이면 거래 시작 = 프리장 개장, AFTERMARKET 이면 거래 종료 = 애프터장 마감."""
     us_today = datetime.datetime.now(NY).date().isoformat()
     day = (toss.us_market_calendar(date=us_today) or {}).get("today") or {}
     reg = day.get("regularMarket")
     if not reg:
         return None
-    return tuple(datetime.datetime.fromisoformat(reg[k]).astimezone(KST)
-                 for k in ("startTime", "endTime"))
+    def kst(v):
+        return datetime.datetime.fromisoformat(v).astimezone(KST)
+    start, end = kst(reg["startTime"]), kst(reg["endTime"])
+    pre = (day.get("preMarket") or {}).get("startTime")
+    post = (day.get("postMarket") or {}).get("endTime")
+    return (kst(pre) if PREMARKET and pre else start, start, end,
+            kst(post) if AFTERMARKET and post else end)
 
 
 def fractional_allowed(session):
@@ -257,18 +288,27 @@ def fractional_allowed(session):
     if not session:
         return False
     now = datetime.datetime.now(KST)
-    return session[0] <= now <= session[1] - datetime.timedelta(hours=1)
+    return session[1] <= now <= session[2] - datetime.timedelta(hours=1)
+
+
+def extended_hours(session):
+    """프리장·애프터장 구간이면 True — 시장가가 아니라 지정가로 낸다."""
+    if not session:
+        return False
+    now = datetime.datetime.now(KST)
+    return now < session[1] or now > session[2]
 
 
 def session_block(session):
-    """지금 실행하면 안 되는 이유. 정규장 시작 5분 전 ~ 종료 사이면 None(실행 가능)."""
+    """지금 실행하면 안 되는 이유. 거래 시작 5분 전 ~ 거래 종료 사이면 None(실행 가능).
+    session[-1] 이라 프리장만 쓰던 3원소 구간도 그대로 받는다."""
     if not session:
         return "휴장일"
     now = datetime.datetime.now(KST)
     if now < session[0] - datetime.timedelta(minutes=5):
         return f"장 시작 전 (개장 {session[0]:%H:%M} KST)"
-    if now > session[1]:
-        return f"장 마감 후 (마감 {session[1]:%H:%M} KST)"
+    if now > session[-1]:
+        return f"장 마감 후 (마감 {session[-1]:%H:%M} KST)"
     return None
 
 
@@ -497,10 +537,12 @@ def allocate(decisions, account, session):
     rules = {"최대 보유 종목 수": MAX_POSITIONS, "종목당 최대 비중 % (총자산 대비)": MAX_POSITION_PCT,
              "항상 남길 현금 비중 %": CASH_RESERVE_PCT, "최소 주문 금액 USD": MIN_ORDER_USD,
              "소수점(금액) 주문 가능": fractional_allowed(session),
+             "장외(프리·애프터) 여부": extended_hours(session),
              "매수 금액": "코드가 모멘텀 구간으로 정함 (아래 planned_buy_usd). Claude 는 승인/거부만"}
     payload = {
         "기준 시각 (KST)": _now(),
-        "정규장 (KST)": [s.isoformat(timespec="minutes") for s in session] if session else None,
+        "장 시간 (KST, 거래시작·정규개장·정규마감·거래종료)":
+            [s.isoformat(timespec="minutes") for s in session] if session else None,
         "규칙": rules,
         "계좌": {"현금 USD": account["cash"], "총자산 USD": account["total_value"],
                "보유": account["holdings"], "미체결 주문 종목": account["open_orders"]},
@@ -515,9 +557,42 @@ def allocate(decisions, account, session):
     return ask_claude("instructions_portfolio.md", payload, ALLOCATION_SCHEMA)
 
 
+def forced_exits(decisions, account):
+    """코드가 강제하는 청산. Claude 판단과 무관하게 나간다 — LLM 이 hold 를 고집하거나
+    종목 판단 호출 자체가 실패해도 포지션이 방치되지 않게 하는 안전장치.
+      (1) 손절: 평단 대비 -STOP_LOSS_PCT%  (계좌 값만 쓰므로 Claude 없이도 동작)
+      (2) 모멘텀 청산: 보유 종목의 20일 수익률이 음수로 꺾임 — 단 갈아탈 후보가 있을 때만
+    (2)는 새 신호가 아니라 기존 신호의 대칭 적용이다 — 백테스트에서 20일 수익률 음수 구간이
+    가장 못 올랐고, 매수도 size_factor 0 으로 이미 막고 있다.
+    다만 백테스트가 보여준 모멘텀 청산의 우위는 '판 자리에 바로 재진입한다'는 가정에서만 나온다.
+    갈아탈 후보가 하나도 없으면 회전이 아니라 그냥 저점 매도이므로 청산하지 않는다.
+    미체결 주문이 있는 종목은 validate_orders 의 매도 루프가 알아서 걸러낸다."""
+    out = []
+    # 재진입 후보 = 미보유 종목 중 모멘텀 배수가 살아 있는 것. 실제 1주 살 현금이 되는지까지는 안 본다.
+    # ponytail: 후보 존재 여부만 확인. 현금·최소주문까지 보려면 planned_buy_amount 와 현재가가 필요.
+    rotate_to = [s for s, d in decisions.items()
+                 if s not in account["holdings"] and d["status"]["size_factor"] > 0]
+    for sym, h in account["holdings"].items():
+        pnl = h.get("pnl_pct")
+        if STOP_LOSS_PCT > 0 and pnl is not None and pnl <= -STOP_LOSS_PCT:
+            why = f"손절 규칙: 평단 대비 {pnl:.1f}% (기준 -{STOP_LOSS_PCT:.0f}%)"
+        else:
+            ret20 = ((decisions.get(sym) or {}).get("status") or {}).get("ret_20d_pct")
+            if not (MOMENTUM_EXIT and ret20 is not None and ret20 < 0):
+                continue
+            if not rotate_to:
+                log.info("모멘텀 청산 보류 %s (20일 %.1f%%): 갈아탈 후보 없음", sym, ret20)
+                continue
+            why = f"모멘텀 청산 규칙: 20일 수익률 {ret20:.1f}% (음수), 대체 후보 {len(rotate_to)}개"
+        log.warning("강제 청산 %s — %s", sym, why)
+        out.append({"symbol": sym, "side": "sell", "sell_pct": 100, "reason": why})
+    return out
+
+
 def validate_orders(plan, decisions, account, session):
     """Claude 의 주문 목록을 규칙으로 걸러 실제 낼 주문만 남긴다. 매도 먼저, 매수 나중."""
     frac = fractional_allowed(session)
+    pre = extended_hours(session)
     holdings = dict(account["holdings"])
     total = account["total_value"]
     cash_left = account["cash"] - total * CASH_RESERVE_PCT / 100
@@ -528,7 +603,11 @@ def validate_orders(plan, decisions, account, session):
         skipped.append({**o, "skipped": why})
         log.info("주문 제외 %s %s: %s", o.get("side"), o.get("symbol"), why)
 
-    sells = [o for o in plan["orders"] if o["side"] == "sell"]
+    # 강제 청산이 먼저. 같은 종목에 대한 Claude 매도는 중복이므로 버린다.
+    forced = forced_exits(decisions, account)
+    exited = {o["symbol"] for o in forced}
+    sells = forced + [o for o in plan["orders"] if o["side"] == "sell"
+                      and str(o["symbol"]).upper() not in exited]
     buys = [o for o in plan["orders"] if o["side"] == "buy"]
     for o in sells:
         sym = str(o["symbol"]).upper()
@@ -545,8 +624,10 @@ def validate_orders(plan, decisions, account, session):
             qty = float(int(qty)) if pct < 100 else h["quantity"]   # 정규장 외엔 정수 주만
         if qty <= 0 or (pct < 100 and qty * h["last_price"] < MIN_ORDER_USD):
             skip(o, "최소 주문 금액 미만 (전량 매도는 예외)"); continue
+        limit = round(h["last_price"] * (1 - PREMARKET_SLIP / 100), 2) if pre else None
         out.append({"symbol": sym, "side": "sell", "quantity": round(qty, 6),
-                    "price": h["last_price"], "amount_usd": round(qty * h["last_price"], 2),
+                    "price": h["last_price"], "limit_price": limit,
+                    "amount_usd": round(qty * h["last_price"], 2),
                     "reason": o["reason"]})
         if pct >= 100:
             positions.discard(sym)
@@ -555,6 +636,8 @@ def validate_orders(plan, decisions, account, session):
         d = decisions.get(sym)
         if not d:
             skip(o, "판단 대상이 아닌 종목"); continue
+        if sym in exited:
+            skip(o, "같은 사이클에서 강제 청산된 종목"); continue
         if sym in account["open_orders"]:
             skip(o, "미체결 주문 있음"); continue
         if sym not in positions and len(positions) >= MAX_POSITIONS:
@@ -573,6 +656,7 @@ def validate_orders(plan, decisions, account, session):
                 skip(o, "정규장 외 시간이라 정수 주 필요, 1주 미만"); continue
             amount = qty * price
         out.append({"symbol": sym, "side": "buy", "quantity": qty, "price": price,
+                    "limit_price": round(price * (1 + PREMARKET_SLIP / 100), 2) if pre else None,
                     "amount_usd": round(amount, 2), "reason": o["reason"]})
         cash_left -= amount
         positions.add(sym)
@@ -582,14 +666,17 @@ def validate_orders(plan, decisions, account, session):
 def place_order(toss, run_id, o):
     """토스 주문. clientOrderId 로 멱등성 확보 — 같은 run 에서 재시도해도 중복 주문이 안 난다."""
     coid = f"at{run_id}-{o['symbol']}-{o['side']}"
+    lim = o.get("limit_price")          # 프리장엔 시장가를 못 받아서 지정가로 낸다
+    otype = "LIMIT" if lim else "MARKET"
     if o["side"] == "buy":
         if o["quantity"] is None:
-            return toss.create_order(o["symbol"], "BUY", "MARKET",
+            return toss.create_order(o["symbol"], "BUY", otype, price=lim,
                                      order_amount=f"{o['amount_usd']:.2f}", client_order_id=coid)
-        return toss.create_order(o["symbol"], "BUY", "MARKET",
+        return toss.create_order(o["symbol"], "BUY", otype, price=lim,
                                  quantity=str(int(o["quantity"])), client_order_id=coid)
     q = f"{o['quantity']:.6f}".rstrip("0").rstrip(".")
-    return toss.create_order(o["symbol"], "SELL", "MARKET", quantity=q, client_order_id=coid)
+    return toss.create_order(o["symbol"], "SELL", otype, price=lim,
+                             quantity=q, client_order_id=coid)
 
 
 # ---------- 한 사이클 ----------
@@ -678,9 +765,11 @@ def run_cycle(dry_run=None, force=False):
 
 if __name__ == "__main__":
     initialize_db()
-    log.info("모델 %s @ %s · 후보 %d · 최대 %d종목 · 종목당 %.0f%% · 현금유지 %.0f%% · 실행 %s%s",
-             MODEL, BASE_URL, TOP_N, MAX_POSITIONS, MAX_POSITION_PCT,
-             CASH_RESERVE_PCT, ", ".join(TRADE_TIMES), " · DRY_RUN" if DRY_RUN else " · 실주문")
+    log.info("모델 %s @ %s · 후보 %d · 최대 %d종목 · 종목당 %.0f%% · 현금유지 %.0f%% · 청산 %s · 실행 %s%s",
+             MODEL, BASE_URL, TOP_N, MAX_POSITIONS, MAX_POSITION_PCT, CASH_RESERVE_PCT,
+             (f"손절 -{STOP_LOSS_PCT:.0f}%" if STOP_LOSS_PCT > 0 else "손절 없음")
+             + (" + 모멘텀 음수" if MOMENTUM_EXIT else ""),
+             ", ".join(TRADE_TIMES), " · DRY_RUN" if DRY_RUN else " · 실주문")
     run_cycle(force="--force" in sys.argv or "--once" in sys.argv)   # 수동 실행은 장 시간 무시
     if "--once" in sys.argv:
         sys.exit(0)

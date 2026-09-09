@@ -15,3 +15,14 @@ data_cache/
 
 # 토스 토큰 캐시 (프로세스 간 공유)
 .toss_token.json
+
+# 학습 모델 캐시
+models_cache/
+
+# 런타임 로그·백테스트 출력
+server.log
+bt_*.txt
+bt_*.err
+
+# 백엔드 런타임 기록
+backend/

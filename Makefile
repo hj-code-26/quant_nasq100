@@ -3,7 +3,7 @@
 #   make            웹 대시보드 실행 (http://127.0.0.1:8877) + 브라우저 열기
 #   make help       전체 명령 보기
 #
-# macOS 기본 도구(bash 3.2 / lsof / open)에 맞춘 판본.
+# macOS(lsof/open) · Windows Git Bash(netstat/taskkill) 양쪽에서 동작한다.
 
 SHELL := /bin/bash
 .SHELLFLAGS := -c
@@ -13,22 +13,24 @@ DPORT ?= 8501
 URL   := http://127.0.0.1:$(PORT)
 LOG   := autotrade.log
 
-# 포트를 LISTEN 중인 PID
-PIDS = lsof -ti tcp:$(PORT) -sTCP:LISTEN 2>/dev/null | sort -u
+# 포트를 LISTEN 중인 PID — lsof(mac) 와 netstat(Windows) 결과를 합쳐서 중복 제거
+PIDS = { lsof -ti tcp:$(PORT) -sTCP:LISTEN 2>/dev/null; netstat -ano 2>/dev/null | grep -iE 'listen' | grep -E '[:.]$(PORT)[[:space:]]' | awk '{print $$NF}'; } | grep -E '^[0-9]+$$' | sort -u
+
+# 포트 점유 프로세스 정리 (mac: kill, Windows: taskkill — 서로 상대 PID 를 못 죽이므로 둘 다 시도)
+KILL_PORT = pids=$$($(PIDS)); if [ -z "$$pids" ]; then echo "  포트 $(PORT) 비어 있음"; else for p in $$pids; do if taskkill //F //PID $$p >/dev/null 2>&1 || kill -9 $$p 2>/dev/null; then echo "  포트 $(PORT) 점유 프로세스 종료: PID $$p"; else echo "  PID $$p 종료 실패 (권한?)"; fi; done; sleep 1; fi
+
+# 브라우저 열기 (mac / Windows / Linux)
+BROWSE = { open $(URL) || cmd //c start "" "$(URL)" || xdg-open $(URL); } >/dev/null 2>&1 || true
 
 .DEFAULT_GOAL := run
-.PHONY: run help install dash once live stop restart status logs check eval backtest clean
+.PHONY: run help install dash once live stop restart status logs check eval backtest backtest-daily test clean
 
 # ---------- 실행 ----------
-run:  ## 웹 대시보드 실행 + 브라우저 열기 (기본, Ctrl+C 로 종료)
-	@if [ -n "$$($(PIDS))" ]; then \
-	  echo "이미 실행 중 -> $(URL)"; \
-	  open $(URL) 2>/dev/null || true; \
-	else \
-	  echo "대시보드 시작 -> $(URL)   (Ctrl+C 로 종료)"; \
-	  ( sleep 2; open $(URL) 2>/dev/null || true ) & \
-	  PORT=$(PORT) $(PY) autotrade_server.py; \
-	fi
+run:  ## 대시보드 실행 — 포트 정리 후 시작 + 브라우저 열기 (기본, Ctrl+C 로 종료)
+	@$(KILL_PORT)
+	@echo "대시보드 시작 -> $(URL)   (Ctrl+C 로 종료)"
+	@( sleep 2; $(BROWSE) ) &
+	@PORT=$(PORT) $(PY) autotrade_server.py
 
 dash:  ## Streamlit 대시보드 실행 (http://127.0.0.1:8501)
 	@echo "Streamlit 시작 -> http://127.0.0.1:$(DPORT)   (Ctrl+C 로 종료)"
@@ -47,24 +49,17 @@ live:  ## 1회 실주문 (확인 문구 '실주문' 입력 필요)
 
 # ---------- 서버 관리 ----------
 stop:  ## 대시보드 종료 (해당 포트 점유 프로세스)
-	@pids=$$($(PIDS)); \
-	if [ -z "$$pids" ]; then echo "실행 중이 아님"; else \
-	  for p in $$pids; do kill $$p 2>/dev/null && echo "종료됨 PID $$p"; done; \
-	fi
+	@$(KILL_PORT)
 
-restart: stop  ## 대시보드 재시작
-	@sleep 1; $(MAKE) --no-print-directory run
+restart:  ## 대시보드 재시작 (run 이 이미 포트를 정리한다)
+	@$(MAKE) --no-print-directory run
 
 status:  ## 실행 상태 + 봇 상태 확인
 	@pids=$$($(PIDS)); \
 	if [ -z "$$pids" ]; then echo "대시보드: 꺼짐"; else \
 	  echo "대시보드: 켜짐 -> $(URL)  (PID $$pids)"; \
 	  curl -sf --max-time 5 $(URL)/api/state \
-	    | $(PY) -c "import json,sys; d=json.load(sys.stdin); c=d['config']; \
-print(f\"  모드    : {'모의(DRY_RUN)' if d['dry_run'] else '실주문'}\"); \
-print(f\"  자동실행: {'켜짐' if d['auto'] else '꺼짐'}   다음 {d['next_run'] or '—'}\"); \
-print(f\"  마지막  : {d['last_run'] or '—'}\"); \
-print(f\"  모델    : {c['model']}\")" 2>/dev/null || echo "  (상태 조회 실패)"; \
+	    | PYTHONIOENCODING=utf-8 $(PY) -c "import json,sys; d=json.load(sys.stdin); c=d['config']; print('  \ubaa8\ub4dc    : ' + ('\ubaa8\uc758(DRY_RUN)' if d['dry_run'] else '\uc2e4\uc8fc\ubb38')); print('  \uc790\ub3d9\uc2e4\ud589: ' + ('\ucf1c\uc9d0' if d['auto'] else '\uaebc\uc9d0') + '   \ub2e4\uc74c ' + str(d['next_run'] or '\u2014')); print('  \ub9c8\uc9c0\ub9c9  : ' + str(d['last_run'] or '\u2014')); print('  \ubaa8\ub378    : ' + c['model'])" 2>/dev/null || echo "  (상태 조회 실패)"; \
 	fi
 
 logs:  ## 로그 따라보기 (Ctrl+C 로 중단)
@@ -79,6 +74,12 @@ eval:  ## 지난 판단 성적표 (기록 vs 이후 가격)
 
 backtest:  ## 선별 규칙 백테스트 (data_cache 사용, 네트워크 불필요)
 	@$(PY) backtest.py --strategy
+
+backtest-daily:  ## 계좌 단위 일별 시뮬 — 청산·진입 규칙 조합 비교 (data_cache 사용)
+	@$(PY) backtest.py --daily
+
+test:  ## 자체 점검 (지표 · 주문 검증 규칙, 네트워크 불필요)
+	@$(PY) test_indicators.py && $(PY) test_validate.py
 
 # ---------- 설치 · 정리 ----------
 install:  ## 의존성 설치
