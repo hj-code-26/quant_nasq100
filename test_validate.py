@@ -150,4 +150,28 @@ a = acct(100, {"AAPL": hold(10, 100, 50)})
 assert at.forced_exits({"AAPL": dec("AAPL", "hold", 50, -30, a)}, a) == []
 at.STOP_LOSS_PCT, at.MOMENTUM_EXIT = 15, True
 
+# --- 만기 청산: 보유 거래일이 상한을 넘으면 Claude 판단과 무관하게 전량 매도 ---
+at.MAX_HOLD_DAYS = 20
+old_days = at.trading_days_since
+at.trading_days_since = lambda d: None if d is None else d       # 테스트는 일수를 직접 넣는다
+a = acct(100, {"AAPL": hold(10, 100, 105)})
+d = {"AAPL": dec("AAPL", "hold", 105, 25, a)}
+out, _ = run([], d, a, session=REGULAR)                          # entries 없으면 만기 판단 불가
+assert out == []
+out, _ = at.validate_orders({"orders": [], "summary": ""}, d, a, REGULAR, {"AAPL": 20})
+assert len(out) == 1 and "만기" in out[0]["reason"]
+out, _ = at.validate_orders({"orders": [], "summary": ""}, d, a, REGULAR, {"AAPL": 19})
+assert out == []
+at.trading_days_since = old_days
+
+# --- 변동성 타겟: 노출 상한 초과분은 실제 매도 주문으로 나가야 한다 (plan 에만 넣고 끝나면 안 된다) ---
+old_cap = at.exposure_cap
+at.exposure_cap = lambda verbose=False: 0.5                      # 주식 노출 상한 50%
+a = acct(100, {"AAPL": hold(10, 100, 105)})                      # 주식 1050 / 총 1150 → 초과분 있음
+out, _ = at.validate_orders({"orders": [], "summary": ""},
+                            {"AAPL": dec("AAPL", "hold", 105, 25, a)}, a, REGULAR, {})
+assert len(out) == 1 and "변동성 타겟" in out[0]["reason"]
+at.exposure_cap = old_cap
+
+
 print("validate_orders OK")

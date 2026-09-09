@@ -7,3 +7,4 @@ streamlit
 fastapi
 uvicorn
 pydantic
+yfinance

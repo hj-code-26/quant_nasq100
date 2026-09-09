@@ -26,3 +26,6 @@ bt_*.err
 
 # 백엔드 런타임 기록
 backend/
+# 실행 로그 (컴퓨터마다 따로 쌓이므로 추적하지 않는다)
+autotrade.log
+.env.bak*

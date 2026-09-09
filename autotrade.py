@@ -54,14 +54,24 @@ AFTERMARKET = os.environ.get("AFTERMARKET", "1") == "1"   # 애프터장(05:00~0
 PREMARKET_SLIP = float(os.environ.get("PREMARKET_SLIP", 0.5))  # 장외 지정가 버퍼 %
 
 SCREEN_N = int(os.environ.get("SCREEN_N", 40))            # 규칙 점수 상위 몇 개를 Claude 에 보여줄지
-TOP_N = int(os.environ.get("TOP_N", 5))                   # Claude 가 고르는 후보 수
-MAX_POSITIONS = int(os.environ.get("MAX_POSITIONS", 5))   # 동시 보유 최대 종목 수
-MAX_POSITION_PCT = float(os.environ.get("MAX_POSITION_PCT", 30))   # 종목당 최대 비중 (총자산 대비 %)
+TOP_N = int(os.environ.get("TOP_N", 10))                  # Claude 가 고르는 후보 수
+MAX_POSITIONS = int(os.environ.get("MAX_POSITIONS", 10))  # 동시 보유 최대 종목 수 (5→10: 낙폭·집중도 개선)
+MAX_POSITION_PCT = float(os.environ.get("MAX_POSITION_PCT", 15))   # 종목당 최대 비중 (총자산 대비 %)
 CASH_RESERVE_PCT = float(os.environ.get("CASH_RESERVE_PCT", 10))   # 항상 남겨둘 현금 비중 (%)
 MIN_ORDER_USD = float(os.environ.get("MIN_ORDER_USD", 5))
 STOP_LOSS_PCT = float(os.environ.get("STOP_LOSS_PCT", 25))   # 평단 대비 -N% 면 전량 매도 (0 이면 끔)
-MOMENTUM_EXIT = os.environ.get("MOMENTUM_EXIT", "1") == "1"  # 20일 수익률이 음수로 꺾이면 전량 매도
+MOMENTUM_EXIT = os.environ.get("MOMENTUM_EXIT", "0") == "1"  # 20일 수익률 음전 시 전량 매도.
+# 기본 꺼짐: 같은 백테스트에서 MAX_HOLD_DAYS 만기 청산(승률 56.4%)이 모멘텀 청산(42.1%)보다 우위였다
 WORKERS = int(os.environ.get("WORKERS", 3))               # 종목별 판단 병렬 수 (Claude 속도 제한 고려)
+# 아래 셋은 1998~2026 나스닥100 백테스트(탐색 1999~2014 / 검증 2015~2026)에서 나온 값이다.
+# 근거는 backtest_bear.py, backtest_slots.py, backtest_regimes.py 참고.
+MAX_HOLD_DAYS = int(os.environ.get("MAX_HOLD_DAYS", 20))  # 만기 청산 (거래일). 0 이면 끔
+BEAR_INDEX = os.environ.get("BEAR_INDEX", "QQQ")          # 국면 판정용 지수 ETF. 빈 값이면 유니버스 중앙값 사용
+BEAR_RET60_PCT = float(os.environ.get("BEAR_RET60_PCT", -3))   # 60일 수익률이 이 밑이면 하락 국면
+# 변동성 타겟: 계좌 일별 수익률의 실현 변동성이 목표를 넘으면 주식 노출을 줄인다 (0 이면 끔).
+# 신규 매수만 조이는 방식은 슬롯이 늘 차 있어 아무 효과가 없었다 — 보유분을 줄여야 작동한다.
+VOL_TARGET_PCT = float(os.environ.get("VOL_TARGET_PCT", 30))
+VOL_WINDOW = int(os.environ.get("VOL_WINDOW", 60))         # 실현 변동성 계산 창 (거래일)
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")   # 윈도우 콘솔(cp949)에서 한글 로그가 깨지지 않게
 logging.basicConfig(
@@ -114,7 +124,9 @@ def initialize_db():
         CREATE TABLE IF NOT EXISTS orders (
             id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER, timestamp TEXT, symbol TEXT,
             side TEXT, quantity REAL, amount_usd REAL, price REAL, order_id TEXT,
-            status TEXT, reason TEXT);""")
+            status TEXT, reason TEXT);
+        CREATE TABLE IF NOT EXISTS equity (
+            date TEXT PRIMARY KEY, total_value REAL, timestamp TEXT);""")
         cols = [r[1] for r in conn.execute("PRAGMA table_info(trading_decisions)")]
         if "run_id" not in cols:   # 단일 종목 버전 DB 호환
             conn.execute("ALTER TABLE trading_decisions ADD COLUMN run_id INTEGER")
@@ -124,6 +136,48 @@ def initialize_db():
                          ("cost_usd", "REAL")):
             if col not in rcols:
                 conn.execute(f"ALTER TABLE runs ADD COLUMN {col} {typ}")
+
+
+def log_equity(total_value):
+    """하루에 한 줄, 그 날 마지막 총자산. 변동성 타겟이 쓰는 유일한 이력이다."""
+    if not total_value:
+        return
+    today = datetime.datetime.now(NY).date().isoformat()   # 미국 거래일 기준
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("INSERT INTO equity (date, total_value, timestamp) VALUES (?, ?, ?) "
+                     "ON CONFLICT(date) DO UPDATE SET total_value=excluded.total_value, "
+                     "timestamp=excluded.timestamp", (today, float(total_value), _now()))
+
+
+def exposure_cap(verbose=False):
+    """주식에 둘 수 있는 최대 비중(0~1). 자산 이력이 모자라면 None (기능 비활성).
+
+    계좌 일별 수익률의 최근 VOL_WINDOW 일 실현 변동성을 연율화해, 목표를 넘는 만큼
+    노출을 깎는다. 레버리지는 없다 (상한 1.0).
+    """
+    if VOL_TARGET_PCT <= 0:
+        return None
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            vals = [r[0] for r in conn.execute(
+                "SELECT total_value FROM (SELECT date, total_value FROM equity "
+                "ORDER BY date DESC LIMIT ?) ORDER BY date", (VOL_WINDOW + 1,))]
+    except sqlite3.OperationalError:      # 첫 실행 — equity 테이블이 아직 없다
+        return None
+    if len(vals) < VOL_WINDOW + 1:
+        return None
+    rets = [b / a - 1 for a, b in zip(vals, vals[1:]) if a]
+    if len(rets) < 2:
+        return None
+    vol = (sum((r - sum(rets) / len(rets)) ** 2 for r in rets) / (len(rets) - 1)) ** 0.5
+    vol_ann = vol * (252 ** 0.5) * 100
+    if vol_ann <= 0:
+        return None
+    cap = min(1.0, VOL_TARGET_PCT / vol_ann)
+    if verbose:
+        log.info("변동성 타겟: 실현 %.1f%% / 목표 %.0f%% → 주식 노출 상한 %.0f%%",
+                 vol_ann, VOL_TARGET_PCT, cap * 100)
+    return cap
 
 
 def _now():
@@ -142,6 +196,72 @@ def db_update_run(run_id, **fields):
     sets = ", ".join(f"{k}=?" for k in fields)
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(f"UPDATE runs SET {sets} WHERE id=?", [*fields.values(), run_id])
+
+
+def filled_orders(toss):
+    """계좌의 체결 완료 주문 (토스 status=CLOSED). 실패하면 빈 목록."""
+    try:
+        rows = (toss.orders("CLOSED") or {}).get("orders") or []
+    except Exception as e:  # noqa: BLE001
+        log.warning("체결 이력 조회 실패: %s", e)
+        return []
+    return [o for o in rows
+            if (o.get("execution") or {}).get("filledQuantity") and o.get("orderedAt")]
+
+
+def position_entry_map(toss=None):
+    """{종목: 현 보유분을 처음 산 시각(ISO)}.
+
+    1순위는 토스 체결 이력이다 — **계좌 기준이라 다른 컴퓨터에서 낸 주문도 보인다.**
+    수량을 시간순으로 누적해 0 → 양수로 바뀐 시점을 진입으로 잡으므로 분할 매도도 처리된다.
+    토스 조회가 실패하면 이 컴퓨터의 orders 표로 대체한다(로컬 주문만 보인다).
+    """
+    out = {}
+    for o in sorted(filled_orders(toss) if toss else [], key=lambda x: x["orderedAt"]):
+        sym = str(o.get("symbol", "")).upper()
+        qty, opened = out.get(sym, (0.0, None))
+        f = float(o["execution"]["filledQuantity"])
+        if str(o.get("side", "")).upper() == "BUY":
+            if qty <= 1e-9:
+                opened = o["orderedAt"]
+            qty += f
+        else:
+            qty -= f
+            if qty <= 1e-9:
+                qty, opened = 0.0, None
+        out[sym] = (qty, opened)
+    entries = {sym: opened for sym, (qty, opened) in out.items() if opened}
+    if entries:
+        return entries
+    with sqlite3.connect(DB_PATH) as conn:       # 대체: 로컬 DB
+        rows = conn.execute(
+            """SELECT symbol, timestamp, side FROM orders
+               WHERE status IN ('submitted','filled') ORDER BY id""").fetchall()
+    local = {}
+    for sym, ts, side in rows:
+        if side == "buy":
+            local.setdefault(sym, ts)
+        elif side == "sell":
+            local.pop(sym, None)
+    return local
+
+
+def trading_days_since(ts):
+    """ts(ISO) 이후 흘러간 미국 거래일 수. 주말만 제외한 근사치 (휴장일은 무시)."""
+    if not ts:
+        return None
+    try:
+        start = datetime.datetime.fromisoformat(ts).astimezone(NY).date()
+    except ValueError:
+        return None
+    days = 0
+    cur = start
+    today = datetime.datetime.now(NY).date()
+    while cur < today:
+        cur += datetime.timedelta(days=1)
+        if cur.weekday() < 5:
+            days += 1
+    return days
 
 
 def fetch_last_decisions(symbol, num=10):
@@ -399,7 +519,39 @@ MOMENTUM_TIERS = (   # (20일 수익률 하한 %, 포지션 크기 배수, 이�
 )
 
 
-def momentum_tier(ret_20d):
+def market_regime(toss, rows=None):
+    """시장 국면. 지수(기본 QQQ) 60일 수익률이 BEAR_RET60_PCT 미만이면 '하락'.
+
+    QQQ 는 ^NDX 를 사실상 그대로 따라간다 (1999~2026 60일 수익률 상관 0.9996,
+    -3% 판정 일치율 99.6%). 지수를 못 받으면 유니버스 60일 수익률 중앙값으로 대신한다
+    (지수 판정과 90.7% 일치하지만 성적은 더 낮으므로 어디까지나 대비책이다).
+    """
+    ret60 = src = None
+    if BEAR_INDEX:
+        try:
+            df = candles(toss, BEAR_INDEX, "1d", 90)
+            if len(df) >= 61:
+                ret60 = (df["close"].iloc[-1] / df["close"].iloc[-61] - 1) * 100
+                src = BEAR_INDEX
+        except Exception as e:  # noqa: BLE001
+            log.warning("국면 판정용 %s 캔들 실패: %s", BEAR_INDEX, e)
+    if ret60 is None and rows:
+        vals = sorted(r["ret_60d_pct"] for r in rows if r.get("ret_60d_pct") is not None)
+        if vals:
+            ret60 = vals[len(vals) // 2]
+            src = "유니버스 중앙값"
+    if ret60 is None:
+        return {"regime": "보통", "ret_60d_pct": None, "source": "판정 실패 — 기본값"}
+    regime = "하락" if ret60 < BEAR_RET60_PCT else "보통"
+    return {"regime": regime, "ret_60d_pct": round(float(ret60), 2), "source": src}
+
+
+def momentum_tier(ret_20d, regime="보통"):
+    """포지션 크기 배수. 하락 국면에서는 선별 기준이 모멘텀이 아니라 변동성이므로
+    모멘텀 부호로 매수를 막지 않는다 (막으면 저변동성 후보의 약 47% 가 잘려나가고,
+    깊은 하락장에서는 전 종목이 잘려 자동으로 현금 100% 가 된다 — 검증에서 가장 나빴던 상태)."""
+    if regime == "하락":
+        return 1.0, "하락 국면(저변동성 선별 — 모멘텀 무관)"
     for lo, factor, name in MOMENTUM_TIERS:
         if ret_20d is not None and ret_20d >= lo:
             return factor, name
@@ -424,8 +576,14 @@ def rule_score(df):
     return round(s, 1)
 
 
-def screen(toss, universe=TICKERS):
-    """전 종목 일봉 요약, 20일 모멘텀 내림차순. 지표는 참고 열로만 남긴다."""
+def screen(toss, universe=TICKERS, regime="보통"):
+    """전 종목 일봉 요약. 평상시엔 20일 모멘텀 내림차순.
+
+    하락 국면에서는 **일중 변동폭(atr_pct) 오름차순**으로 바꾼다. 하락장에서 모멘텀 상위는
+    유니버스 대비 -0.71%p 로 엣지가 뒤집히는 반면, 저변동성은 진입 승률이
+    50.2%→58.4%(탐색) / 61.6%→68.8%(검증), -10% 넘는 손실 비율이 21.2%→8.1% / 14.4%→4.0%
+    로 개선된다 (backtest_bear.py).
+    """
     rows = []
     for sym in universe:
         try:
@@ -434,7 +592,7 @@ def screen(toss, universe=TICKERS):
                 continue
             c = df.iloc[-1]
             ret20 = (c["close"] / df["close"].iloc[-21] - 1) * 100
-            factor, tier = momentum_tier(ret20)
+            factor, tier = momentum_tier(ret20, regime)
             rows.append({
                 "symbol": sym, "close": round(c["close"], 2),
                 "ret_20d_pct": round(ret20, 2), "momentum_tier": tier, "size_factor": factor,
@@ -447,7 +605,10 @@ def screen(toss, universe=TICKERS):
                 "atr_pct": round((df["high"] - df["low"]).tail(14).mean() / c["close"] * 100, 2)})
         except Exception as e:  # noqa: BLE001
             log.warning("스크리닝 %s 실패: %s", sym, e)
-    rows.sort(key=lambda r: r["ret_20d_pct"], reverse=True)
+    if regime == "하락":
+        rows.sort(key=lambda r: (r["atr_pct"] is None, r["atr_pct"]))
+    else:
+        rows.sort(key=lambda r: r["ret_20d_pct"], reverse=True)
     return [{k: (None if isinstance(v, float) and pd.isna(v)
                  else float(v) if isinstance(v, float) else v) for k, v in r.items()}
             for r in rows]
@@ -487,16 +648,20 @@ def get_current_status(toss, symbol, account):
             "pnl_pct": held.get("pnl_pct")}
 
 
-def stock_decision(toss, symbol, account, why_candidate=None):
+def stock_decision(toss, symbol, account, why_candidate=None, regime="보통", entries=None):
     status = get_current_status(toss, symbol, account)
     data = fetch_and_prepare_data(toss, symbol)
     d = data["daily_ohlcv"]
     ret20 = (d[-1]["close"] / d[-21]["close"] - 1) * 100 if len(d) >= 21 else None
-    factor, tier = momentum_tier(ret20)
+    factor, tier = momentum_tier(ret20, regime)
     status["ret_20d_pct"] = round(ret20, 2) if ret20 is not None else None
     status["momentum_tier"] = tier
     status["size_factor"] = factor
+    held_days = trading_days_since((entries or {}).get(symbol)) if status["stock_balance"] else None
     decision = ask_claude("instructions.md", {
+        "시장 국면": regime,
+        "보유 거래일수": held_days,
+        "만기 청산 기준 (거래일)": MAX_HOLD_DAYS,
         "종목": {"symbol": symbol, "선별 이유": why_candidate,
                "현재 보유 여부": symbol in account["holdings"],
                "20일 수익률 %": status["ret_20d_pct"], "모멘텀 구간": tier},
@@ -508,11 +673,12 @@ def stock_decision(toss, symbol, account, why_candidate=None):
     return {"symbol": symbol, **decision, "status": status}
 
 
-def decide_all(toss, symbols, account, reasons):
+def decide_all(toss, symbols, account, reasons, regime="보통", entries=None):
     """종목별 판단을 병렬로. 한 종목이 실패해도 나머지는 진행한다."""
     results = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=WORKERS) as ex:
-        futs = {ex.submit(stock_decision, toss, s, account, reasons.get(s)): s for s in symbols}
+        futs = {ex.submit(stock_decision, toss, s, account, reasons.get(s), regime, entries): s
+                for s in symbols}
         for f in concurrent.futures.as_completed(futs):
             s = futs[f]
             try:
@@ -533,14 +699,20 @@ def planned_buy_amount(symbol, decisions, account):
     return max(0.0, cap * d["status"]["size_factor"])
 
 
-def allocate(decisions, account, session):
-    rules = {"최대 보유 종목 수": MAX_POSITIONS, "종목당 최대 비중 % (총자산 대비)": MAX_POSITION_PCT,
+def allocate(decisions, account, session, regime="보통", entries=None):
+    cap = exposure_cap()
+    rules = {"최대 보유 종목 수": MAX_POSITIONS,
+             "주식 노출 상한 % (변동성 타겟)": round(cap * 100, 1) if cap is not None else "미적용", "종목당 최대 비중 % (총자산 대비)": MAX_POSITION_PCT,
              "항상 남길 현금 비중 %": CASH_RESERVE_PCT, "최소 주문 금액 USD": MIN_ORDER_USD,
              "소수점(금액) 주문 가능": fractional_allowed(session),
              "장외(프리·애프터) 여부": extended_hours(session),
              "매수 금액": "코드가 모멘텀 구간으로 정함 (아래 planned_buy_usd). Claude 는 승인/거부만"}
     payload = {
         "기준 시각 (KST)": _now(),
+        "시장 국면": regime,
+        "만기 청산": f"보유 {MAX_HOLD_DAYS}거래일이 지난 종목은 코드가 자동 매도한다 (0이면 끔)",
+        "보유 거래일수": {s: trading_days_since((entries or {}).get(s))
+                     for s in account["holdings"]},
         "장 시간 (KST, 거래시작·정규개장·정규마감·거래종료)":
             [s.isoformat(timespec="minutes") for s in session] if session else None,
         "규칙": rules,
@@ -589,7 +761,7 @@ def forced_exits(decisions, account):
     return out
 
 
-def validate_orders(plan, decisions, account, session):
+def validate_orders(plan, decisions, account, session, entries=None):
     """Claude 의 주문 목록을 규칙으로 걸러 실제 낼 주문만 남긴다. 매도 먼저, 매수 나중."""
     frac = fractional_allowed(session)
     pre = extended_hours(session)
@@ -608,7 +780,47 @@ def validate_orders(plan, decisions, account, session):
     exited = {o["symbol"] for o in forced}
     sells = forced + [o for o in plan["orders"] if o["side"] == "sell"
                       and str(o["symbol"]).upper() not in exited]
+
+    # 변동성 타겟: 주식 노출이 상한을 넘으면 큰 종목부터 줄인다.
+    # 백테스트는 전 종목 비례 축소였지만, 실전에서는 최소 주문 금액과 수수료 때문에
+    # 큰 종목부터 깎는다 (주문 수가 줄고 집중도도 함께 낮아진다).
+    cap = exposure_cap()
+    if cap is not None and total > 0:
+        stock_value = sum(h["market_value"] for h in holdings.values())
+        excess = stock_value - total * cap
+        if excess > MIN_ORDER_USD:
+            log.info("노출 축소: 주식 %.1f%% → 상한 %.0f%%, %.2f 달러 줄인다",
+                     stock_value / total * 100, cap * 100, excess)
+            named = {str(o["symbol"]).upper() for o in sells}
+            for sym, h in sorted(holdings.items(), key=lambda kv: -kv[1]["market_value"]):
+                if excess <= MIN_ORDER_USD:
+                    break
+                if sym in named or sym in account["open_orders"]:
+                    continue
+                cut = min(excess, h["market_value"])
+                pct = min(100.0, cut / h["market_value"] * 100)
+                if cut < MIN_ORDER_USD:
+                    continue
+                sells.append({
+                    "symbol": sym, "side": "sell", "sell_pct": round(pct, 2),
+                    "reason": f"변동성 타겟 — 주식 노출 상한 {cap * 100:.0f}% 초과분 축소"})
+                named.add(sym)
+                excess -= cut
+
     buys = [o for o in plan["orders"] if o["side"] == "buy"]
+    # 만기 청산: 보유 MAX_HOLD_DAYS 거래일이 지난 종목은 Claude 판단과 무관하게 전량 매도한다.
+    # 28년 백테스트에서 고정 20거래일 만기 청산의 승률은 56.4%, 하락 5구간 전부 1등이었다.
+    # 기존의 "20일 수익률 음전 시 매도" 는 같은 조건에서 승률 42.1% 로 14%p 낮다.
+    if MAX_HOLD_DAYS > 0:
+        named = {str(o["symbol"]).upper() for o in sells}
+        for sym in holdings:
+            if sym in named or sym in account["open_orders"]:
+                continue
+            held = trading_days_since((entries or {}).get(sym))
+            if held is not None and held >= MAX_HOLD_DAYS:
+                sells.append({"symbol": sym, "side": "sell", "sell_pct": 100,
+                              "reason": f"보유 {held}거래일로 만기({MAX_HOLD_DAYS}) 도달 — 코드 강제 청산"})
+                log.info("만기 청산 %s: 보유 %d거래일", sym, held)
     for o in sells:
         sym = str(o["symbol"]).upper()
         h = holdings.get(sym)
@@ -631,6 +843,9 @@ def validate_orders(plan, decisions, account, session):
                     "reason": o["reason"]})
         if pct >= 100:
             positions.discard(sym)
+    if cap is not None and total > 0:      # 노출 상한 안에서만 신규 매수
+        room = total * cap - sum(h["market_value"] for h in holdings.values())
+        cash_left = min(cash_left, max(0.0, room))
     for o in buys:
         sym = str(o["symbol"]).upper()
         d = decisions.get(sym)
@@ -701,11 +916,30 @@ def run_cycle(dry_run=None, force=False):
         db_update_run(run_id, total_value=account["total_value"], cash=account["cash"])
         log.info("계좌: 현금 $%.2f 총자산 $%.2f 보유 %s", account["cash"],
                  account["total_value"], list(account["holdings"]))
+        log_equity(account["total_value"])    # 변동성 타겟이 쓰는 일별 자산 이력
+        if VOL_TARGET_PCT > 0 and exposure_cap(verbose=True) is None:
+            with sqlite3.connect(DB_PATH) as _c:
+                _n = _c.execute("SELECT COUNT(*) FROM equity").fetchone()[0]
+            log.info("변동성 타겟 대기: 자산 이력 %d/%d일", _n, VOL_WINDOW + 1)
+        entries = position_entry_map(toss)     # 계좌 기준 진입 시각 (다른 PC 주문도 포함)
+        log.info("보유 거래일수: %s", {s: trading_days_since(entries.get(s))
+                                 for s in account["holdings"]})
+
+        # 0) 시장 국면 (하락 국면이면 선별 기준이 모멘텀 → 저변동성으로 바뀐다)
+        reg = market_regime(toss)
+        regime = reg["regime"]
+        log.info("국면: %s (%s 60일 %s%%, 기준 %s%%)", regime, reg["source"],
+                 reg["ret_60d_pct"], BEAR_RET60_PCT)
 
         # 1) 스크리닝
-        rows = screen(toss)
-        log.info("스크리닝 %d종목, 20일 수익률 상위: %s", len(rows),
-                 [(r["symbol"], r["ret_20d_pct"]) for r in rows[:8]])
+        rows = screen(toss, regime=regime)
+        if regime == "하락":
+            reg = market_regime(toss, rows) if reg["ret_60d_pct"] is None else reg
+            log.info("스크리닝 %d종목, 저변동성(atr_pct) 하위: %s", len(rows),
+                     [(r["symbol"], r["atr_pct"]) for r in rows[:8]])
+        else:
+            log.info("스크리닝 %d종목, 20일 수익률 상위: %s", len(rows),
+                     [(r["symbol"], r["ret_20d_pct"]) for r in rows[:8]])
         picks = pick_candidates(rows, account)
         reasons = {p["symbol"]: p["reason"] for p in picks}
         log.info("후보: %s", list(reasons))
@@ -713,7 +947,7 @@ def run_cycle(dry_run=None, force=False):
 
         # 2) 종목별 판단 (후보 + 보유)
         symbols = list(dict.fromkeys(list(reasons) + list(account["holdings"])))
-        decisions = decide_all(toss, symbols, account, reasons)
+        decisions = decide_all(toss, symbols, account, reasons, regime, entries)
         for d in decisions.values():
             st = d["status"]
             db_insert("trading_decisions", {
@@ -725,9 +959,9 @@ def run_cycle(dry_run=None, force=False):
             raise RuntimeError("종목별 판단이 하나도 없음")
 
         # 3) 배분 → 검증 → 주문
-        plan = allocate(decisions, account, session)
+        plan = allocate(decisions, account, session, regime, entries)
         log.info("배분 요약: %s", plan["summary"])
-        orders, skipped = validate_orders(plan, decisions, account, session)
+        orders, skipped = validate_orders(plan, decisions, account, session, entries)
         for o in orders:
             row = {"run_id": run_id, "timestamp": _now(), "symbol": o["symbol"], "side": o["side"],
                    "quantity": o["quantity"], "amount_usd": o["amount_usd"], "price": o["price"],
