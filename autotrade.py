@@ -50,9 +50,9 @@ TRADE_TIMES = [t.strip() for t in
                os.environ.get("TRADE_TIMES", "22:30,23:30,00:00,02:00,04:00").split(",")]
 
 SCREEN_N = int(os.environ.get("SCREEN_N", 40))            # 규칙 점수 상위 몇 개를 Claude 에 보여줄지
-TOP_N = int(os.environ.get("TOP_N", 5))                   # Claude 가 고르는 후보 수
-MAX_POSITIONS = int(os.environ.get("MAX_POSITIONS", 5))   # 동시 보유 최대 종목 수
-MAX_POSITION_PCT = float(os.environ.get("MAX_POSITION_PCT", 30))   # 종목당 최대 비중 (총자산 대비 %)
+TOP_N = int(os.environ.get("TOP_N", 10))                  # Claude 가 고르는 후보 수
+MAX_POSITIONS = int(os.environ.get("MAX_POSITIONS", 10))  # 동시 보유 최대 종목 수 (5→10: 낙폭·집중도 개선)
+MAX_POSITION_PCT = float(os.environ.get("MAX_POSITION_PCT", 15))   # 종목당 최대 비중 (총자산 대비 %)
 CASH_RESERVE_PCT = float(os.environ.get("CASH_RESERVE_PCT", 10))   # 항상 남겨둘 현금 비중 (%)
 MIN_ORDER_USD = float(os.environ.get("MIN_ORDER_USD", 5))
 WORKERS = int(os.environ.get("WORKERS", 3))               # 종목별 판단 병렬 수 (Claude 속도 제한 고려)

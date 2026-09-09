@@ -18,3 +18,4 @@ data_cache/
 
 # 실행 로그 (컴퓨터마다 따로 쌓이므로 추적하지 않는다)
 autotrade.log
+.env.bak*
