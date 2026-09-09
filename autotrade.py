@@ -61,6 +61,10 @@ WORKERS = int(os.environ.get("WORKERS", 3))               # 종목별 판단 병
 MAX_HOLD_DAYS = int(os.environ.get("MAX_HOLD_DAYS", 20))  # 만기 청산 (거래일). 0 이면 끔
 BEAR_INDEX = os.environ.get("BEAR_INDEX", "QQQ")          # 국면 판정용 지수 ETF. 빈 값이면 유니버스 중앙값 사용
 BEAR_RET60_PCT = float(os.environ.get("BEAR_RET60_PCT", -3))   # 60일 수익률이 이 밑이면 하락 국면
+# 변동성 타겟: 계좌 일별 수익률의 실현 변동성이 목표를 넘으면 주식 노출을 줄인다 (0 이면 끔).
+# 신규 매수만 조이는 방식은 슬롯이 늘 차 있어 아무 효과가 없었다 — 보유분을 줄여야 작동한다.
+VOL_TARGET_PCT = float(os.environ.get("VOL_TARGET_PCT", 30))
+VOL_WINDOW = int(os.environ.get("VOL_WINDOW", 60))         # 실현 변동성 계산 창 (거래일)
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
@@ -112,7 +116,9 @@ def initialize_db():
         CREATE TABLE IF NOT EXISTS orders (
             id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER, timestamp TEXT, symbol TEXT,
             side TEXT, quantity REAL, amount_usd REAL, price REAL, order_id TEXT,
-            status TEXT, reason TEXT);""")
+            status TEXT, reason TEXT);
+        CREATE TABLE IF NOT EXISTS equity (
+            date TEXT PRIMARY KEY, total_value REAL, timestamp TEXT);""")
         cols = [r[1] for r in conn.execute("PRAGMA table_info(trading_decisions)")]
         if "run_id" not in cols:   # 단일 종목 버전 DB 호환
             conn.execute("ALTER TABLE trading_decisions ADD COLUMN run_id INTEGER")
@@ -122,6 +128,45 @@ def initialize_db():
                          ("cost_usd", "REAL")):
             if col not in rcols:
                 conn.execute(f"ALTER TABLE runs ADD COLUMN {col} {typ}")
+
+
+def log_equity(total_value):
+    """하루에 한 줄, 그 날 마지막 총자산. 변동성 타겟이 쓰는 유일한 이력이다."""
+    if not total_value:
+        return
+    today = datetime.datetime.now(NY).date().isoformat()   # 미국 거래일 기준
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("INSERT INTO equity (date, total_value, timestamp) VALUES (?, ?, ?) "
+                     "ON CONFLICT(date) DO UPDATE SET total_value=excluded.total_value, "
+                     "timestamp=excluded.timestamp", (today, float(total_value), _now()))
+
+
+def exposure_cap(verbose=False):
+    """주식에 둘 수 있는 최대 비중(0~1). 자산 이력이 모자라면 None (기능 비활성).
+
+    계좌 일별 수익률의 최근 VOL_WINDOW 일 실현 변동성을 연율화해, 목표를 넘는 만큼
+    노출을 깎는다. 레버리지는 없다 (상한 1.0).
+    """
+    if VOL_TARGET_PCT <= 0:
+        return None
+    with sqlite3.connect(DB_PATH) as conn:
+        vals = [r[0] for r in conn.execute(
+            "SELECT total_value FROM (SELECT date, total_value FROM equity "
+            "ORDER BY date DESC LIMIT ?) ORDER BY date", (VOL_WINDOW + 1,))]
+    if len(vals) < VOL_WINDOW + 1:
+        return None
+    rets = [b / a - 1 for a, b in zip(vals, vals[1:]) if a]
+    if len(rets) < 2:
+        return None
+    vol = (sum((r - sum(rets) / len(rets)) ** 2 for r in rets) / (len(rets) - 1)) ** 0.5
+    vol_ann = vol * (252 ** 0.5) * 100
+    if vol_ann <= 0:
+        return None
+    cap = min(1.0, VOL_TARGET_PCT / vol_ann)
+    if verbose:
+        log.info("변동성 타겟: 실현 %.1f%% / 목표 %.0f%% → 주식 노출 상한 %.0f%%",
+                 vol_ann, VOL_TARGET_PCT, cap * 100)
+    return cap
 
 
 def _now():
@@ -611,7 +656,9 @@ def planned_buy_amount(symbol, decisions, account):
 
 
 def allocate(decisions, account, session, regime="보통", entries=None):
-    rules = {"최대 보유 종목 수": MAX_POSITIONS, "종목당 최대 비중 % (총자산 대비)": MAX_POSITION_PCT,
+    cap = exposure_cap()
+    rules = {"최대 보유 종목 수": MAX_POSITIONS,
+             "주식 노출 상한 % (변동성 타겟)": round(cap * 100, 1) if cap is not None else "미적용", "종목당 최대 비중 % (총자산 대비)": MAX_POSITION_PCT,
              "항상 남길 현금 비중 %": CASH_RESERVE_PCT, "최소 주문 금액 USD": MIN_ORDER_USD,
              "소수점(금액) 주문 가능": fractional_allowed(session),
              "매수 금액": "코드가 모멘텀 구간으로 정함 (아래 planned_buy_usd). Claude 는 승인/거부만"}
@@ -649,6 +696,32 @@ def validate_orders(plan, decisions, account, session, entries=None):
         skipped.append({**o, "skipped": why})
         log.info("주문 제외 %s %s: %s", o.get("side"), o.get("symbol"), why)
 
+    # 변동성 타겟: 주식 노출이 상한을 넘으면 큰 종목부터 줄인다.
+    # 백테스트는 전 종목 비례 축소였지만, 실전에서는 최소 주문 금액과 수수료 때문에
+    # 큰 종목부터 깎는다 (주문 수가 줄고 집중도도 함께 낮아진다).
+    cap = exposure_cap()
+    if cap is not None and total > 0:
+        stock_value = sum(h["market_value"] for h in holdings.values())
+        excess = stock_value - total * cap
+        if excess > MIN_ORDER_USD:
+            log.info("노출 축소: 주식 %.1f%% → 상한 %.0f%%, %.2f 달러 줄인다",
+                     stock_value / total * 100, cap * 100, excess)
+            named = {str(o["symbol"]).upper() for o in plan["orders"] if o["side"] == "sell"}
+            for sym, h in sorted(holdings.items(), key=lambda kv: -kv[1]["market_value"]):
+                if excess <= MIN_ORDER_USD:
+                    break
+                if sym in named or sym in account["open_orders"]:
+                    continue
+                cut = min(excess, h["market_value"])
+                pct = min(100.0, cut / h["market_value"] * 100)
+                if cut < MIN_ORDER_USD:
+                    continue
+                plan["orders"].insert(0, {
+                    "symbol": sym, "side": "sell", "sell_pct": round(pct, 2),
+                    "reason": f"변동성 타겟 — 주식 노출 상한 {cap * 100:.0f}% 초과분 축소"})
+                named.add(sym)
+                excess -= cut
+
     sells = [o for o in plan["orders"] if o["side"] == "sell"]
     buys = [o for o in plan["orders"] if o["side"] == "buy"]
     # 만기 청산: 보유 MAX_HOLD_DAYS 거래일이 지난 종목은 Claude 판단과 무관하게 전량 매도한다.
@@ -684,6 +757,9 @@ def validate_orders(plan, decisions, account, session, entries=None):
                     "reason": o["reason"]})
         if pct >= 100:
             positions.discard(sym)
+    if cap is not None and total > 0:      # 노출 상한 안에서만 신규 매수
+        room = total * cap - sum(h["market_value"] for h in holdings.values())
+        cash_left = min(cash_left, max(0.0, room))
     for o in buys:
         sym = str(o["symbol"]).upper()
         d = decisions.get(sym)
@@ -748,6 +824,11 @@ def run_cycle(dry_run=None, force=False):
         db_update_run(run_id, total_value=account["total_value"], cash=account["cash"])
         log.info("계좌: 현금 $%.2f 총자산 $%.2f 보유 %s", account["cash"],
                  account["total_value"], list(account["holdings"]))
+        log_equity(account["total_value"])    # 변동성 타겟이 쓰는 일별 자산 이력
+        if VOL_TARGET_PCT > 0 and exposure_cap(verbose=True) is None:
+            with sqlite3.connect(DB_PATH) as _c:
+                _n = _c.execute("SELECT COUNT(*) FROM equity").fetchone()[0]
+            log.info("변동성 타겟 대기: 자산 이력 %d/%d일", _n, VOL_WINDOW + 1)
         entries = position_entry_map(toss)     # 계좌 기준 진입 시각 (다른 PC 주문도 포함)
         log.info("보유 거래일수: %s", {s: trading_days_since(entries.get(s))
                                  for s in account["holdings"]})
