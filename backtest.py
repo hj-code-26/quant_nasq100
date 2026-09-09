@@ -116,6 +116,9 @@ def main():
     if "--exits" in sys.argv:         # 목표가/손절가 청산 규칙 비교만
         exits_report(all_df, split)
         return
+    if "--momentum-exit" in sys.argv:  # 운영 청산 규칙(모멘텀 음전) 실측만
+        momentum_exit_report(all_df, split)
+        return
     report("① 현재 규칙 점수의 구성 요소 (각각 단독)", d, [
         ("종가 > SMA20", d.close_gt_sma20),
         ("종가 < SMA20", ~d.close_gt_sma20),
@@ -250,6 +253,100 @@ def exits_report(all_df, split_date, top=5, hold=20):
             print(row)
         n, m, hit, sd, dh = simulate(None, None, part)
         print(f"   (기준: 청산 규칙 없음 {n:,}건, 평균 {m:+.2f}%, 표준편차 {sd:.1f}%)")
+
+
+def simulate_exits(series, picks, hold=None, mom_below=None, cap=None, sl=None, cap_days=250):
+    """청산 규칙 하나로 진입 목록을 전부 시뮬레이션한다. backtest_regimes.py 도 이걸 쓴다.
+
+    series: {symbol: (close 배열, ret20 배열, {날짜: 인덱스})}
+    picks : (date, symbol) 행을 가진 DataFrame — 진입 목록
+    hold  = 고정 보유일 / mom_below = ret_20d 가 이 값 밑으로 가면 매도
+    cap   = 최대 보유일 / sl = 손절 % (종가 기준)
+    """
+    rets, days, unclosed = [], [], 0
+    limit = hold or cap or cap_days
+    for date, sym in picks.itertuples(index=False):
+        close, ret20, idx = series[sym]
+        i = idx.get(date)
+        if i is None or i + 1 >= len(close):
+            continue
+        entry = close[i]
+        r = held = None
+        for k in range(1, min(limit, len(close) - 1 - i) + 1):
+            px = close[i + k]
+            if sl is not None and px <= entry * (1 - sl / 100):
+                r, held = (px / entry - 1) * 100, k; break
+            if hold is not None and k == hold:
+                r, held = (px / entry - 1) * 100, k; break
+            if mom_below is not None and not np.isnan(ret20[i + k]) and ret20[i + k] < mom_below:
+                r, held = (px / entry - 1) * 100, k; break
+        if r is None:                      # 규칙이 안 걸린 채 데이터/상한 소진
+            j = min(i + limit, len(close) - 1)
+            r, held = (close[j] / entry - 1) * 100, j - i
+            if hold is None:
+                unclosed += 1
+        rets.append(r); days.append(held)
+    if not rets:
+        return None
+    x, d = pd.Series(rets), pd.Series(days)
+    per_day = x.mean() / d.mean()          # 자본 회전을 감안한 비교용
+    return {"n": len(x), "mean": x.mean(), "hit": (x > 0).mean() * 100,
+            "days": d.mean(), "bp": per_day * 100, "ann": per_day * 252,
+            "worst": x.min(), "big_loss": (x <= -10).mean() * 100, "unclosed": unclosed}
+
+
+def momentum_exit_report(all_df, split_date, top=5, cap_days=250):
+    """⑩ 운영 청산 규칙("20일 수익률 음전 시 매도")을 고정 보유일 청산과 나란히 실측.
+
+    운영 코드의 유일한 청산 트리거는 instructions_portfolio.md 1번의
+    "보유 종목의 ret_20d 가 음수로 내려앉으면 매도" 다. 그런데 ⑧ 은 고정 보유일(5/20일),
+    ⑨ 는 목표가·손절가만 재봤을 뿐 이 규칙을 한 번도 측정한 적이 없다.
+    여기서는 진입(모멘텀 상위 top)을 똑같이 두고 **청산 규칙만** 바꿔 비교한다.
+
+    · 진입: 매일 ret_20d 상위 top 종목, 종가 매수
+    · 청산: 규칙이 걸린 날의 종가 매도 (모멘텀 규칙은 그날 ret_20d 를 보고 판단)
+    · cap_days 안에 규칙이 안 걸리면 마지막 봉 종가로 강제 청산하고 '미청산'으로 센다
+    · 보유 기간이 규칙마다 다르므로 건당 수익률만 보면 안 된다. 일당 수익률로 같이 본다
+    """
+    print(f"\n### ⑩ 청산 규칙 실측 — 모멘텀 상위 {top}종목 진입, 청산 규칙만 교체 (상한 {cap_days}일)")
+    series = {}
+    for sym in all_df["symbol"].unique():
+        df = pickle.load((CACHE / f"{sym}_1d.pkl").open("rb"))
+        close = df["close"].to_numpy(float)
+        ret20 = np.full(len(close), np.nan)
+        ret20[20:] = (close[20:] / close[:-20] - 1) * 100
+        series[sym] = (close, ret20, {d: i for i, d in enumerate(df.index)})
+
+    picks = (all_df.sort_values("ret_20d", ascending=False)
+             .groupby("date").head(top)[["date", "symbol"]])
+
+    def simulate(part, **kw):
+        return simulate_exits(series, part, cap_days=cap_days, **kw)
+
+    rules = [
+        ("고정 5일 청산", dict(hold=5)),
+        ("고정 20일 청산 (⑧ 이 검증한 것)", dict(hold=20)),
+        ("고정 40일 청산", dict(hold=40)),
+        ("[운영] ret_20d < 0 이면 매도", dict(mom_below=0)),
+        ("[운영] + 최대 20일 상한", dict(mom_below=0, cap=20)),
+        ("[운영] + -15% 손절", dict(mom_below=0, sl=15)),
+        ("ret_20d < 5% 이면 매도 (조기화)", dict(mom_below=5)),
+        ("ret_20d < 10% 이면 매도 (조기화)", dict(mom_below=10)),
+    ]
+    for label, part in (("탐색", picks[picks["date"] < split_date]),
+                        ("검증", picks[picks["date"] >= split_date])):
+        print(f"\n[{label}]")
+        print(f"{'청산 규칙':34}{'건수':>7}{'건당':>8}{'승률':>7}{'보유일':>7}"
+              f"{'일당bp':>8}{'연환산':>8}{'최악건':>8}{'-10%이하':>9}{'미청산':>7}")
+        for name, kw in rules:
+            s = simulate(part, **kw)
+            print(f"{name:34}{s['n']:>7,}{s['mean']:+7.2f}%{s['hit']:6.1f}%{s['days']:7.1f}"
+                  f"{s['bp']:8.1f}{s['ann']:+7.1f}%{s['worst']:+7.1f}%{s['big_loss']:8.1f}%"
+                  f"{s['unclosed']:>7,}")
+    print("\n  · 일당bp = 건당 수익률 / 평균 보유일 (bp). 보유 기간이 규칙마다 달라 건당 수익률만으론 비교가 안 된다.")
+    print("  · 연환산 = 일당 수익률 × 252 (복리 아님, 자본 회전 효율의 대략적 비교용).")
+    print(f"  · 미청산 = 상한 {cap_days}일 안에 규칙이 안 걸려 마지막 봉으로 강제 청산한 건수.")
+
 
 
 if __name__ == "__main__":

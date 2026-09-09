@@ -15,3 +15,6 @@ data_cache/
 
 # 토스 토큰 캐시 (프로세스 간 공유)
 .toss_token.json
+
+# 실행 로그 (컴퓨터마다 따로 쌓이므로 추적하지 않는다)
+autotrade.log
