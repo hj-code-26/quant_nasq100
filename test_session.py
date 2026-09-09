@@ -32,4 +32,13 @@ with at(7, 30, day=1):                 # 애프터장 → 실행 가능, 지정�
 with at(9, 30, day=1):                 # 애프터장 마감 후
     assert a.session_block(sess).startswith("장 마감 후")
 assert a.session_block(None) == "휴장일"
+
+# 사전 분석 창: 정규장 개장(22:30) 전 60분 안에서만 연다.
+with at(22, 0):                        # 개장 30분 전 → 열림
+    assert round(a.analysis_lead_min(sess)) == 30
+with at(21, 0):                        # 개장 90분 전 → 아직
+    assert a.analysis_lead_min(sess) is None
+with at(23, 0):                        # 이미 개장 → 정규 사이클이 맡는다
+    assert a.analysis_lead_min(sess) is None
+assert a.analysis_lead_min(None) is None          # 휴장일
 print("ok")

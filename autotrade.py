@@ -49,6 +49,13 @@ DRY_RUN = os.environ.get("DRY_RUN", "1") == "1"           # 기본은 모의. �
 TRADE_TIMES = [t.strip() for t in
                os.environ.get("TRADE_TIMES",
                               "17:00,22:30,23:30,00:00,02:00,04:00,06:00,08:00").split(",")]
+# 사전 분석: 정규장 개장 전에 스크리닝·판단까지만 돌려 로그·DB 에 남긴다 (주문은 안 낸다).
+# 소수점 매수가 정규장에만 되니 실주문은 개장 뒤지만, 무엇을 살지는 미리 봐 둔다.
+# 서머타임에 따라 정규장 개장이 22:30/23:30 KST 로 밀리므로 두 시각을 다 걸어두고,
+# 개장까지 ANALYSIS_LEAD_MIN 분 넘게 남은 쪽은 실행 시점에 스스로 건너뛴다.
+ANALYSIS_TIMES = [t.strip() for t in
+                  os.environ.get("ANALYSIS_TIMES", "22:00,23:00").split(",") if t.strip()]
+ANALYSIS_LEAD_MIN = 60          # ANALYSIS_TIMES 를 바꾸면 이 창도 같이 볼 것
 PREMARKET = os.environ.get("PREMARKET", "1") == "1"       # 프리장(17:00~22:30 KST)에도 주문할지
 AFTERMARKET = os.environ.get("AFTERMARKET", "1") == "1"   # 애프터장(05:00~09:00 KST)에도 주문할지
 PREMARKET_SLIP = float(os.environ.get("PREMARKET_SLIP", 0.5))  # 장외 지정가 버퍼 %
@@ -410,6 +417,14 @@ def fractional_allowed(session):
         return False
     now = datetime.datetime.now(KST)
     return session[1] <= now <= session[2] - datetime.timedelta(hours=1)
+
+
+def analysis_lead_min(session):
+    """정규장 개장까지 남은 분. 사전 분석 창(개장 전 ANALYSIS_LEAD_MIN 분 안) 밖이면 None."""
+    if not session:
+        return None
+    left = (session[1] - datetime.datetime.now(KST)).total_seconds() / 60
+    return left if 0 < left <= ANALYSIS_LEAD_MIN else None
 
 
 def extended_hours(session):
@@ -909,7 +924,7 @@ def run_cycle(dry_run=None, force=False):
         toss = shared_client()
         session = market_session(toss)
         why = session_block(session)
-        if why and not force:
+        if why and not (force and session):
             log.info("%s — 건너뜀 (강제 실행은 --force 또는 대시보드 1회 실행)", why)
             db_update_run(run_id, status="skipped", summary=why)
             return
@@ -998,18 +1013,31 @@ def run_cycle(dry_run=None, force=False):
                  u["calls"], f"{u['input_tokens']:,}", f"{u['output_tokens']:,}", u["cost_usd"], MODEL)
 
 
+def run_analysis():
+    """정규장 개장 직전 사전 분석. 주문 없이 분석만 (dry_run) 돌린다."""
+    left = analysis_lead_min(market_session(shared_client()))
+    if left is None:
+        log.info("사전 분석 건너뜀: 휴장일이거나 개장 %d분 전 창 밖", ANALYSIS_LEAD_MIN)
+        return
+    log.info("=== 사전 분석 (정규장 개장 %.0f분 전, 주문 없음) ===", left)
+    run_cycle(dry_run=True, force=True)
+
+
 if __name__ == "__main__":
     initialize_db()
     log.info("모델 %s @ %s · 후보 %d · 최대 %d종목 · 종목당 %.0f%% · 현금유지 %.0f%% · 청산 %s · 실행 %s%s",
              MODEL, BASE_URL, TOP_N, MAX_POSITIONS, MAX_POSITION_PCT, CASH_RESERVE_PCT,
              (f"손절 -{STOP_LOSS_PCT:.0f}%" if STOP_LOSS_PCT > 0 else "손절 없음")
              + (" + 모멘텀 음수" if MOMENTUM_EXIT else ""),
-             ", ".join(TRADE_TIMES), " · DRY_RUN" if DRY_RUN else " · 실주문")
+             ", ".join(TRADE_TIMES) + " · 사전분석 " + ", ".join(ANALYSIS_TIMES),
+             " · DRY_RUN" if DRY_RUN else " · 실주문")
     run_cycle(force="--force" in sys.argv or "--once" in sys.argv)   # 수동 실행은 장 시간 무시
     if "--once" in sys.argv:
         sys.exit(0)
     for t in TRADE_TIMES:
         schedule.every().day.at(t).do(run_cycle)
+    for t in ANALYSIS_TIMES:
+        schedule.every().day.at(t).do(run_analysis)
     while True:
         schedule.run_pending()
         time.sleep(1)
