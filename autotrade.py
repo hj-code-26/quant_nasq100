@@ -142,24 +142,52 @@ def db_update_run(run_id, **fields):
         conn.execute(f"UPDATE runs SET {sets} WHERE id=?", [*fields.values(), run_id])
 
 
-def position_entry(symbol):
-    """이 종목을 '지금 보유분'으로 처음 산 시각. orders 표에서 역순으로 훑어,
-    가장 최근의 전량 매도 이후 첫 체결 매수를 찾는다. 없으면 None.
+def filled_orders(toss):
+    """계좌의 체결 완료 주문 (토스 status=CLOSED). 실패하면 빈 목록."""
+    try:
+        rows = (toss.orders("CLOSED") or {}).get("orders") or []
+    except Exception as e:  # noqa: BLE001
+        log.warning("체결 이력 조회 실패: %s", e)
+        return []
+    return [o for o in rows
+            if (o.get("execution") or {}).get("filledQuantity") and o.get("orderedAt")]
 
-    주의: orders 는 이 컴퓨터의 로컬 DB다. 다른 컴퓨터에서 낸 주문은 안 보인다.
-    봇은 한 대에서만 돌려야 이 값이 맞는다 (중복 주문 위험도 같은 이유로 피해야 한다)."""
-    with sqlite3.connect(DB_PATH) as conn:
+
+def position_entry_map(toss=None):
+    """{종목: 현 보유분을 처음 산 시각(ISO)}.
+
+    1순위는 토스 체결 이력이다 — **계좌 기준이라 다른 컴퓨터에서 낸 주문도 보인다.**
+    수량을 시간순으로 누적해 0 → 양수로 바뀐 시점을 진입으로 잡으므로 분할 매도도 처리된다.
+    토스 조회가 실패하면 이 컴퓨터의 orders 표로 대체한다(로컬 주문만 보인다).
+    """
+    out = {}
+    for o in sorted(filled_orders(toss) if toss else [], key=lambda x: x["orderedAt"]):
+        sym = str(o.get("symbol", "")).upper()
+        qty, opened = out.get(sym, (0.0, None))
+        f = float(o["execution"]["filledQuantity"])
+        if str(o.get("side", "")).upper() == "BUY":
+            if qty <= 1e-9:
+                opened = o["orderedAt"]
+            qty += f
+        else:
+            qty -= f
+            if qty <= 1e-9:
+                qty, opened = 0.0, None
+        out[sym] = (qty, opened)
+    entries = {sym: opened for sym, (qty, opened) in out.items() if opened}
+    if entries:
+        return entries
+    with sqlite3.connect(DB_PATH) as conn:       # 대체: 로컬 DB
         rows = conn.execute(
-            """SELECT timestamp, side, status FROM orders
-               WHERE symbol=? AND status IN ('submitted','filled') ORDER BY id DESC""",
-            (symbol,)).fetchall()
-    first_buy = None
-    for ts, side, _ in rows:          # 최신 → 과거
-        if side == "sell":
-            break                     # 이 매도 이전 매수는 지금 보유분이 아니다
+            """SELECT symbol, timestamp, side FROM orders
+               WHERE status IN ('submitted','filled') ORDER BY id""").fetchall()
+    local = {}
+    for sym, ts, side in rows:
         if side == "buy":
-            first_buy = ts
-    return first_buy
+            local.setdefault(sym, ts)
+        elif side == "sell":
+            local.pop(sym, None)
+    return local
 
 
 def trading_days_since(ts):
@@ -531,7 +559,7 @@ def get_current_status(toss, symbol, account):
             "pnl_pct": held.get("pnl_pct")}
 
 
-def stock_decision(toss, symbol, account, why_candidate=None, regime="보통"):
+def stock_decision(toss, symbol, account, why_candidate=None, regime="보통", entries=None):
     status = get_current_status(toss, symbol, account)
     data = fetch_and_prepare_data(toss, symbol)
     d = data["daily_ohlcv"]
@@ -540,7 +568,7 @@ def stock_decision(toss, symbol, account, why_candidate=None, regime="보통"):
     status["ret_20d_pct"] = round(ret20, 2) if ret20 is not None else None
     status["momentum_tier"] = tier
     status["size_factor"] = factor
-    held_days = trading_days_since(position_entry(symbol)) if status["stock_balance"] else None
+    held_days = trading_days_since((entries or {}).get(symbol)) if status["stock_balance"] else None
     decision = ask_claude("instructions.md", {
         "시장 국면": regime,
         "보유 거래일수": held_days,
@@ -556,11 +584,11 @@ def stock_decision(toss, symbol, account, why_candidate=None, regime="보통"):
     return {"symbol": symbol, **decision, "status": status}
 
 
-def decide_all(toss, symbols, account, reasons, regime="보통"):
+def decide_all(toss, symbols, account, reasons, regime="보통", entries=None):
     """종목별 판단을 병렬로. 한 종목이 실패해도 나머지는 진행한다."""
     results = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=WORKERS) as ex:
-        futs = {ex.submit(stock_decision, toss, s, account, reasons.get(s), regime): s
+        futs = {ex.submit(stock_decision, toss, s, account, reasons.get(s), regime, entries): s
                 for s in symbols}
         for f in concurrent.futures.as_completed(futs):
             s = futs[f]
@@ -582,7 +610,7 @@ def planned_buy_amount(symbol, decisions, account):
     return max(0.0, cap * d["status"]["size_factor"])
 
 
-def allocate(decisions, account, session, regime="보통"):
+def allocate(decisions, account, session, regime="보통", entries=None):
     rules = {"최대 보유 종목 수": MAX_POSITIONS, "종목당 최대 비중 % (총자산 대비)": MAX_POSITION_PCT,
              "항상 남길 현금 비중 %": CASH_RESERVE_PCT, "최소 주문 금액 USD": MIN_ORDER_USD,
              "소수점(금액) 주문 가능": fractional_allowed(session),
@@ -591,7 +619,8 @@ def allocate(decisions, account, session, regime="보통"):
         "기준 시각 (KST)": _now(),
         "시장 국면": regime,
         "만기 청산": f"보유 {MAX_HOLD_DAYS}거래일이 지난 종목은 코드가 자동 매도한다 (0이면 끔)",
-        "보유 거래일수": {s: trading_days_since(position_entry(s)) for s in account["holdings"]},
+        "보유 거래일수": {s: trading_days_since((entries or {}).get(s))
+                     for s in account["holdings"]},
         "정규장 (KST)": [s.isoformat(timespec="minutes") for s in session] if session else None,
         "규칙": rules,
         "계좌": {"현금 USD": account["cash"], "총자산 USD": account["total_value"],
@@ -607,7 +636,7 @@ def allocate(decisions, account, session, regime="보통"):
     return ask_claude("instructions_portfolio.md", payload, ALLOCATION_SCHEMA)
 
 
-def validate_orders(plan, decisions, account, session):
+def validate_orders(plan, decisions, account, session, entries=None):
     """Claude 의 주문 목록을 규칙으로 걸러 실제 낼 주문만 남긴다. 매도 먼저, 매수 나중."""
     frac = fractional_allowed(session)
     holdings = dict(account["holdings"])
@@ -630,7 +659,7 @@ def validate_orders(plan, decisions, account, session):
         for sym in holdings:
             if sym in named or sym in account["open_orders"]:
                 continue
-            held = trading_days_since(position_entry(sym))
+            held = trading_days_since((entries or {}).get(sym))
             if held is not None and held >= MAX_HOLD_DAYS:
                 sells.append({"symbol": sym, "side": "sell", "sell_pct": 100,
                               "reason": f"보유 {held}거래일로 만기({MAX_HOLD_DAYS}) 도달 — 코드 강제 청산"})
@@ -719,6 +748,9 @@ def run_cycle(dry_run=None, force=False):
         db_update_run(run_id, total_value=account["total_value"], cash=account["cash"])
         log.info("계좌: 현금 $%.2f 총자산 $%.2f 보유 %s", account["cash"],
                  account["total_value"], list(account["holdings"]))
+        entries = position_entry_map(toss)     # 계좌 기준 진입 시각 (다른 PC 주문도 포함)
+        log.info("보유 거래일수: %s", {s: trading_days_since(entries.get(s))
+                                 for s in account["holdings"]})
 
         # 0) 시장 국면 (하락 국면이면 선별 기준이 모멘텀 → 저변동성으로 바뀐다)
         reg = market_regime(toss)
@@ -742,7 +774,7 @@ def run_cycle(dry_run=None, force=False):
 
         # 2) 종목별 판단 (후보 + 보유)
         symbols = list(dict.fromkeys(list(reasons) + list(account["holdings"])))
-        decisions = decide_all(toss, symbols, account, reasons, regime)
+        decisions = decide_all(toss, symbols, account, reasons, regime, entries)
         for d in decisions.values():
             st = d["status"]
             db_insert("trading_decisions", {
@@ -754,9 +786,9 @@ def run_cycle(dry_run=None, force=False):
             raise RuntimeError("종목별 판단이 하나도 없음")
 
         # 3) 배분 → 검증 → 주문
-        plan = allocate(decisions, account, session, regime)
+        plan = allocate(decisions, account, session, regime, entries)
         log.info("배분 요약: %s", plan["summary"])
-        orders, skipped = validate_orders(plan, decisions, account, session)
+        orders, skipped = validate_orders(plan, decisions, account, session, entries)
         for o in orders:
             row = {"run_id": run_id, "timestamp": _now(), "symbol": o["symbol"], "side": o["side"],
                    "quantity": o["quantity"], "amount_usd": o["amount_usd"], "price": o["price"],
