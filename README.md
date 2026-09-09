@@ -24,7 +24,7 @@ toss.py                    토스증권 REST 클라이언트
               → {decision, percentage, reason}                            [Claude 종목당 1회, 병렬]
  3) 배분       종목별 판단 + 계좌 + 규칙 → 최종 주문 목록 + 요약            [Claude 1회]
               → 코드 검증: 최대 종목 수 · 종목당 비중 · 현금 유지 · 최소 주문 · 미체결 · 정규장 외 정수 주
-              → 강제 청산(Claude 판단 무관): 평단 대비 −STOP_LOSS_PCT% · 20일 수익률 음수 → 전량 매도
+              → 강제 청산(Claude 판단 무관): 보유 MAX_HOLD_DAYS 거래일 초과 → 전량 매도
               → 매도 먼저, 매수 나중. clientOrderId 로 중복 주문 방지
  기록          runs / trading_decisions / orders (SQLite) + autotrade.log
 ```
@@ -33,7 +33,8 @@ toss.py                    토스증권 REST 클라이언트
 Claude 가 낸 주문은 반드시 코드의 규칙 검증을 거친다. 규칙은 `.env` 에서 조정.
 
 **청산은 Claude 에 맡기지 않는다.** 코드가 강제하는 청산은 둘이다 — 보유 종목이 평단 대비
-`STOP_LOSS_PCT`(기본 25) % 넘게 빠지면 손절, 보유가 `MAX_HOLD_DAYS`(기본 20) 거래일을 넘기면 만기 청산.
+보유가 `MAX_HOLD_DAYS`(기본 20) 거래일을 넘기면 만기 청산. 손절(`STOP_LOSS_PCT`)·모멘텀 청산(`MOMENTUM_EXIT`)은
+백테스트에서 만기 청산보다 못해 기본 꺼짐.
 Claude 가 hold 를 고집하거나 판단 호출 자체가 실패해도 포지션이 방치되지 않는다.
 손절선이 15 가 아니라 25 인 것도 백테스트 결과다 — 15 는 두 구간 모두에서 수익을 깎았다.
 `MOMENTUM_EXIT`(20일 수익률 음전 시 매도)은 남겨뒀지만 기본 꺼짐이다: 같은 28년 백테스트에서

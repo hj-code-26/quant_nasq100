@@ -59,7 +59,8 @@ MAX_POSITIONS = int(os.environ.get("MAX_POSITIONS", 10))  # 동시 보유 최대
 MAX_POSITION_PCT = float(os.environ.get("MAX_POSITION_PCT", 15))   # 종목당 최대 비중 (총자산 대비 %)
 CASH_RESERVE_PCT = float(os.environ.get("CASH_RESERVE_PCT", 10))   # 항상 남겨둘 현금 비중 (%)
 MIN_ORDER_USD = float(os.environ.get("MIN_ORDER_USD", 5))
-STOP_LOSS_PCT = float(os.environ.get("STOP_LOSS_PCT", 25))   # 평단 대비 -N% 면 전량 매도 (0 이면 끔)
+STOP_LOSS_PCT = float(os.environ.get("STOP_LOSS_PCT", 0))    # 평단 대비 -N% 면 전량 매도 (0 이면 끔)
+# 기본 꺼짐: -10~-30% 전 구간에서 성적이 나빠졌다. -25%는 검증 Sharpe 1.34→0.95, CAGR 33.0→24.2%
 MOMENTUM_EXIT = os.environ.get("MOMENTUM_EXIT", "0") == "1"  # 20일 수익률 음전 시 전량 매도.
 # 기본 꺼짐: 같은 백테스트에서 MAX_HOLD_DAYS 만기 청산(승률 56.4%)이 모멘텀 청산(42.1%)보다 우위였다
 WORKERS = int(os.environ.get("WORKERS", 3))               # 종목별 판단 병렬 수 (Claude 속도 제한 고려)
