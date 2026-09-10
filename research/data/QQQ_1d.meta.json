@@ -1,0 +1,12 @@
+{
+  "symbol": "QQQ",
+  "source": "Yahoo Finance via yfinance (무료·비상업 조건)",
+  "license": "재배포 금지. research/data 내부 캐시 전용",
+  "paid": false,
+  "broker_api_used": false,
+  "new_token_issued": false,
+  "start": "2023-06-01",
+  "end": "2026-09-09",
+  "rows": 821,
+  "sha256": "c4f796e4346e277d2d8932b2b5e6b1c77f377fc4e65ddf4f4e0704f86da88c59"
+}

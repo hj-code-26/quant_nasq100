@@ -1,0 +1,81 @@
+=== test_results.txt — 2026-09-10T12:45:49Z ===
+commit: 2417a171aa7f469c23344327576bbc76b752fee1
+격리: research/isolation.py guard() — 자격증명 제거·운영경로 쓰기 차단·브로커 차단·로그 리다이렉트
+전체 실행 로그: research/out/full_run.log
+
+validate_orders OK
+indicators ok
+ok
+=== research/fetch_index.py ===
+=== research/ab_audit.py ===
+=== research/ab_attribution.py ===
+=== research/test_safety.py ===
+  ok   입출금 제거 — cashflow 기재 시 변동성 불변
+  ok   입출금 미기재 — ±25% 점프 경고
+  ok   변동성 타겟 — 관측 61개 전 비활성
+  ok   변동성 타겟 — 변동성 0 대응
+  ok   변동성 cap 의미 — 총자산 대비 상한
+  ok   신규 진입 차단과 보유분 축소 분리
+  ok   매도 제출 대금 재사용 금지
+  ok   부분청산 나이 유지 / 재진입 리셋
+  ok   추가 매수는 나이 리셋 안 함
+  ok   DST 경계 거래일 계산
+  ok   취소 경합 + 부분체결 clamp
+  ok   매도가능 0 → 주문 거절
+  ok   매도가능 조회 실패 → 계획 수량
+  ok   타임아웃 후 뒤늦은 접수 대사
+  ok   durable intent (재시작 대비)
+  ok   중복 프로세스 동일 clientOrderId
+  ok   낡은 스냅샷 — 매수만 취소
+  ok   QQQ 폴백은 다른 판정을 낼 수 있다
+  ok   국면 판정 불가 시 기본값
+  ok   하락 국면 모멘텀 부호 무시
+  ok   prefix-invariance (미래 행 추가)
+  ok   golden replay — 운영/replay 후보 동일
+통과 22 / 실패 0
+=== research/test_invariance.py ===
+  ok   당일 종가 불변식 (모드 C, 상승 섭동)
+  ok   당일 종가 불변식 (모드 C, 하락 섭동)
+  ok   주입: 누수 복원 → 불변식 실패
+  ok   주입: 슬롯 재사용 → 최대 종목 수 실패
+  ok   주입: 부분체결 clamp 제거 → 실패
+  ok   주입: intent_key 프로세스 고유값 → 중복 주문
+  ok   주입: stale 필터 제거 → 실패
+  ok   주입: 현금 유지 제거 → 대금 재사용 실패
+  ok   손계산 원장 (모드 C)
+  ok   손계산 원장 (모드 A 대조)
+  ok   손계산 원장 (정수 주문 = t-1 종가 산정)
+  ok   손계산 회계 항등식
+통과 12 / 실패 0
+=== research/stats.py ===
+=== research/experiments.py ===
+=== research/shadow.py ===
+  ok   뉴스·응답의 지시가 주문 규칙을 못 바꾼다
+  ok   임의 승인 필드 schema 거부
+  ok   뉴스는 untrusted + available_at 필수
+  ok   결정적 기준선 replay 재현성
+  ok   시간 순서 불변식 (signal<=decision<=order<=fill)
+shadow 테스트 통과 5/5
+=== research/test_ops.py ===
+  ok   A 스케줄러가 대시보드와 함께 죽는다 (재현)
+  ok   A 재시작 후 중복 주문 없음
+  ok   A PROTECT_ONLY 도 실제 주문을 낸다
+  ok   B 같은 머신 토큰 파일 공유 (다중 PC 아님)
+  ok   B 토큰 저장 원자성
+  ok   B 단일 노드 락은 머신 로컬 (split-brain 미해결)
+  ok   C 국면 상태 구분 (정상/폴백/판정불가)
+  ok   C stale 지수 미감지 — 미해결 결함
+  ok   C 복구 후 중복 주문 없음
+통과 9 / 실패 0
+=== research/index_freshness.py ===
+  ok   마감 후 = fresh
+  ok   장중 오늘 봉 = incomplete (미완성 봉)
+  ok   주말은 stale 이 아니다
+  ok   공휴일은 stale 이 아니다
+  ok   조기폐장 13:00 마감
+  ok   DST 경계
+  ok   지연 감지 (stale)
+  ok   캔들 없음·길이 부족 (missing)
+  ok   중간 결측 (gap) 감지
+  ok   대응 분리: 신규 진입 차단 / 보유분 유지
+통과 10 / 실패 0

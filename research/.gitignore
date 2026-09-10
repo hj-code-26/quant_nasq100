@@ -1,0 +1,13 @@
+__pycache__/
+
+# Yahoo Finance 캐시 — 재배포 금지 라이선스. 출처·해시는 meta.json 에 남기고
+# 데이터 자체는 커밋하지 않는다. 재생성: python research/fetch_index.py
+data/*.pkl
+
+# 실행 부산물
+out/shadow_test.db
+out/research_autotrade.log
+
+# 운영 판단 기록(trading_decisions.db)을 백필한 DB. 원본이 git 밖에 있으므로
+# 파생물도 커밋하지 않는다. 재생성: python research/shadow.py
+out/shadow.db

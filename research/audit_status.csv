@@ -1,0 +1,30 @@
+id,분류,항목,상태,코드위치,테스트,근거파일,남은한계
+P0-1,결함,clientOrderId 를 의도 기반으로 — 다중 PC 중복 주문,테스트통과·실환경미검증,autotrade.py:1032 intent_key,test_validate.py:218 / research/test_ops.py t_restart_does_not_duplicate_order,research/out/test_results.txt,동시 제출 경합은 브로커 중복 거절에 의존. 실브로커 검증 없음
+P0-2,결함,미체결이 있어도 위험 축소 매도는 취소 후 진행,테스트통과·실환경미검증,autotrade.py:1061 free_position,research/test_safety.py t_cancel_race_partial_fill / t_sellable_zero_refuses,research/out/test_results.txt,실제 취소·체결 경합 타이밍은 모의로만 재현
+P0-3,결함,위험 관리 패스를 LLM 앞으로 분리,테스트통과,autotrade.py:892 validate_orders / 1160 run_cycle,test_validate.py:210 / research/test_ops.py t_protect_only_still_places_orders,research/out/test_results.txt,run_cycle 전체는 통합 테스트 없음
+P0-4,결함,매도 제출로 슬롯·현금을 비우지 않음,테스트통과,autotrade.py:983 (positions.discard 제거),research/test_safety.py t_sell_proceeds_not_reused / research/test_invariance.py 주입2,research/out/test_results.txt,실제 buying power API 반영은 미검증
+P0-5,문서,대시보드 종료 시 보호 루프 정지,설계·모의테스트·승인대기,autotrade_server.py:46/69 daemon 스레드,research/test_ops.py t_scheduler_dies_with_dashboard,research/approval_requests.md A,운영 분리 미적용. 승인 필요
+P0-6,결함,strict json schema 검증,테스트통과,autotrade.py:542 check_schema,test_validate.py:231-241 / research/shadow.py test_injected_fields_rejected_by_schema,research/out/test_results.txt,게이트웨이 서버측 강제는 여전히 없음
+P0-7,가설,다중 PC 토큰 정책,설계·모의테스트·승인대기,toss.py:59-94 TOKEN_FILE,research/test_ops.py t_token_file_shared_on_same_machine / t_single_node_lock_is_machine_local,research/approval_requests.md B,토스 공식 문서 미확인. 파일 락은 머신 로컬 — split-brain 미해결
+P1-1,결함,거래소 달력 기반 만기 계산,테스트통과,autotrade.py:303 trading_days_since,test_validate.py:247 / research/test_safety.py t_dst_boundary,research/out/test_results.txt,달력은 지수 캔들 의존. 캔들 실패 시 주말 근사로 하락
+P1-2,결함,변동성 타겟 현금 희석 보정,테스트통과,autotrade.py:175 exposure_cap,research/test_safety.py t_vol_cap_* (4건),research/out/test_results.txt,단일자산 근사. 공분산 기반은 C1 실험에서만 (운영 미적용, 게다가 C1 은 탈락)
+P1-3,결함,체결 시점 하루 선행 제거 (모드 B),테스트통과·잔여누수확인,backtest.py:341 daily_sim,research/engine.py assert_equivalent / research/test_invariance.py 주입1,research/out/ab_decomposition.md,B 는 청산 판정·수량 산정에 당일 종가 사용 — 잔여 누수. 모드 C 로 계량
+P1-4,결함,입출금 분리 (cashflow),구현·부분,autotrade.py:156 log_equity / 175 exposure_cap,research/test_safety.py t_cashflow_removed / t_cashflow_unrecorded_is_detected,research/out/test_results.txt,cashflow 는 수동 기입. 운영 DB 는 아직 컬럼 마이그레이션 전(다음 initialize_db 에서 적용). 원화 환산 분리 미구현
+P1-5,문서,백테스트 파라미터를 운영 설정과 일치,테스트통과,backtest.py:437,research/experiments.py BASE,research/out/experiment_results.csv,없음
+P1-6,가설,생존 편향 유니버스,미해소,nasdaq100.py / market_data.py,없음,research/data_gap.csv,PIT 자료 없음. 절대·상대 비교 모두 왜곡
+P1-7,가설,비례 축소 vs 평가액 큰 순 축소,테스트통과·측정완료,autotrade.py:917-940 / research/engine.py trim,research/experiments.py C1 3변형,research/out/risk_reduction_compare.csv,실현변동성·하방편차·MDD·ES5% 로 측정. 차이의 CI 가 0 을 포함 — 미확정
+P1-8,가설,QQQ 실패 시 폴백,설계·모의테스트·승인대기,autotrade.py:652 market_regime,research/test_ops.py t_regime_states_are_distinguishable,research/approval_requests.md C,지표를 바꾸면 하락 판정일 57→104일. 정책 변경은 승인 필요
+G1,게이트,A/B 원장 재현·회계 항등식,테스트통과,research/engine.py sim / ab_audit.py identity_check,research/ab_audit.py,research/out/accounting_identity.csv,9개 조합 전부 오차 <1e-9. 기존 daily_sim 과 자산곡선 완전 일치
+G2,게이트,실행 무결성 회귀,테스트통과·실환경미검증,autotrade.py 다수,research/test_safety.py 22건 + test_ops 9건 + shadow 5건,research/out/test_results.txt,실브로커·다중 PC·실시장 장애는 미검증
+G3,게이트,연구 후보 유의성,미확정,research/stats.py / experiments.py,paired block bootstrap 2000회 L=10/20/40,research/out/bootstrap_summary.csv + experiment_results.csv,A/B/C 차이·C2·C3 전부 95% CI 가 0 포함. C1 은 탈락 조건 적중
+G4,게이트,forward shadow,설계·기록기반만,research/shadow.py,replay·주입내성 5건,research/out/shadow.db,실행 기록 축적 안 됨. 완결 코호트 0
+G5,게이트,실제 배포,미실행,-,-,research/conclusion.md,배포 보류 유지
+N1,신규결함,market_regime 이 지수 캔들 최신성을 확인하지 않음,설계·테스트통과·승인대기,autotrade.py:652-666 / 수정안 research/index_freshness.py,research/index_freshness.py 10건 (주말·공휴일·DST·조기폐장·미완성봉·중간결측),research/out/test_results.txt,fresh/stale/missing/incomplete 판정과 대응 분리까지 설계. 운영 미적용 — 승인 필요
+N2,신규확인,만기 당일 동일 종목 재매수 빈도 0,측정완료,research/experiments.py,만기 청산 315건 중 0건,research/out/experiments.md,C2 의 '비용 절감' 근거는 취소됨
+N3,보완,연구 실행이 운영 로그·운영 DB 를 열었음(1차 작업),고침,research/isolation.py,격리 하네스 자체 점검 + 전 연구 모듈 guard(),research/out/manifest.json isolation_verify,저장소 자체 테스트(test_validate 등)는 여전히 autotrade.log 에 append 한다 — 기존 동작이며 연구 코드가 아니다
+N4,엔진,모드 C 에서 정수 주문 수량을 t 시가로 산정하던 잔여 누수,고침,research/engine.py sim() size_px,research/test_invariance.py t_hand_ledger_integer_order_uses_prior_close,research/out/test_results.txt,금액 주문(소수점)은 원래 누수 없음. 정수 주문만 해당
+N5,검증,당일 종가 불변식 + 결함 주입(mutation),테스트통과,research/test_invariance.py,12건 — 불변식 2 / 주입 6 / 손계산 4,research/out/test_results.txt,주입 6건은 결함을 되살리면 테스트가 실패하는 것까지 확인
+N6,데이터,QQQ 국면지표 이력 확보,해소,research/fetch_index.py,research/out/regime_source.csv,research/data/QQQ_1d.meta.json,Yahoo Finance 무료·비상업. 재배포 금지. 유료 구매·브로커 API·신규 토큰 없음
+N7,분해,A/B 차이 완전 분해 (현금흐름 항등식 + 거래 4갈래),테스트통과,research/ab_attribution.py,합계 오차 < 1e-9 검증 (반올림 전),research/out/ab_attribution.csv,'잔여 = 종목 교체'는 틀렸다. 실제 구성종목 변경은 ⓪ -234.30 / ④ -75.91 USD
+N8,실험,C1 을 단순 저노출·현금 혼합 기준선과 비교,테스트통과·탈락,research/experiments.py C1-대조,research/out/c1_vs_cashmix.csv,research/out/experiments.md,C1 은 사전등록 탈락 조건 적중 — 단순 75% 현금혼합보다 나쁘다 (포기수익/변동성 19.22 vs 1.04)
+N9,절차,산출물 폴더 정리,고침,research/*.csv (수작성) vs research/out/* (생성물),전체 재실행으로 확인,research/out/full_run.log,out/ 를 지우면 재생성되지 않는 수작성 파일이 섞여 있었다. 수작성은 research/ 로 옮김

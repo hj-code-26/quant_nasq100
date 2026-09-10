@@ -1,0 +1,8 @@
+﻿experiment,uses_regime,regime_source,evidence,affected_by_qqq_gap
+⓪운영설정,False,해당 없음,research/ab_audit.py RULES — cfg 에 regime 키 없음,False
+①손절15+모멘텀0,False,해당 없음,research/ab_audit.py RULES,False
+④손절25+모멘텀0+회전가드,False,해당 없음,research/ab_audit.py RULES,False
+BASE(결정적 기준선),False,해당 없음,research/experiments.py BASE,False
+C1(위험타겟),False,해당 없음,cfg=risk_target/trim/warmup_cap 만,False
+C2(만기 재평가),False,해당 없음,cfg=expiry_net 만,False
+C3(국면 완충),True,QQQ 60일 수익률 (운영 기본) + 유니버스 중앙값(폴백) 병행,research/fetch_index.py / experiments.py C3 변형 4개,True

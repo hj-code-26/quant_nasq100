@@ -1,0 +1,66 @@
+# 재현 명령 (저장소 루트에서)
+# 데이터: data_cache/*.pkl (토스 일봉, 오프라인) + research/data/QQQ_1d.pkl (yfinance)
+# 버전·해시·seed·구성종목 기준일·국면지표 출처는 research/out/manifest.json 에 있다.
+#
+# 격리: 모든 연구 스크립트는 첫 줄에서 research.isolation.guard() 를 부른다.
+#   · TOSS_*/ANTHROPIC_* 환경변수 제거, .env·토큰 파일 읽기 차단(빈 내용 대체)
+#   · 운영 DB(+WAL/SHM)·토큰·data_cache·운영 소스 **쓰기 차단**
+#   · 토스 호스트 HTTP 차단 (yahoo 만 허용), 운영 로그는 research/out/ 로 리다이렉트
+#   · 실행 전후 지문(크기·mtime·sha256) 비교
+
+# 0) 격리 baseline 기록 (한 번)
+python research/isolation.py
+
+# 1) 기존 테스트 (수정 보존 확인)
+python test_validate.py
+python test_indicators.py
+python test_session.py
+
+# 2) QQQ 국면지표 확보 (무료·비상업. 유료 구매·브로커 API·신규 토큰 없음)
+python research/fetch_index.py
+
+# 3) A/B/C 원장 재현·회계 항등식·비용 민감도  → manifest.json, ab_summary.csv,
+#    ab_trade_diff.csv, daily_nav.csv, cost_sensitivity.csv, accounting_identity.csv
+python research/ab_audit.py
+
+# 4) A/B 차이의 완전 분해 (현금흐름 항등식 + 거래 단위 4갈래, 반올림 전 합계 검증)
+#    → ab_attribution.csv, ab_attribution.md
+python research/ab_attribution.py
+
+# 5) 안전성·엔진 무결성 회귀 (실제 함수, 22건)
+python research/test_safety.py
+
+# 6) 불변식 + 결함 주입 + 손계산 원장 (12건)
+python research/test_invariance.py
+
+# 7) 짝지은 block bootstrap + walk-forward (신뢰수준·단위·해석 주석 포함)
+python research/stats.py
+
+# 8) 기준선 + C1/C2/C3 + 국면지표 출처 추적 + C1 vs 현금혼합
+#    → experiment_registry.csv, experiment_results.csv, regime_source.csv,
+#      c1_vs_cashmix.csv, risk_reduction_compare.csv
+python research/experiments.py
+
+# 9) forward shadow 스키마 + replay/주입내성 (5건)
+python research/shadow.py
+
+# 10) 승인 대기 3건 모의 테스트 (9건)
+python research/test_ops.py
+
+# 11) N1 지수 최신성 판정 수정안 + 테스트 (10건, 연구 구현·운영 미적용)
+python research/index_freshness.py
+
+# 격리 검증만 다시 보기
+python -c "import sys;sys.path.insert(0,'.');from research.isolation import verify;print(verify())"
+
+# 한 번에:
+#   python research/isolation.py
+#   for f in ab_audit ab_attribution test_safety test_invariance stats experiments shadow test_ops index_freshness; do python research/$f.py; done
+
+# ── 파일 구분 (중요) ──────────────────────────────────────────────────────
+# research/out/**       전부 **재생성물**. 지우고 위 명령을 다시 돌리면 그대로 복원된다.
+# research/data/**      오프라인 캐시 (QQQ). fetch_index.py 가 없으면 새로 받는다.
+# research/*.py         코드
+# research/*.csv|md|txt 수작성 산출물 — audit_status.csv, data_gap.csv,
+#                       approval_requests.md, conclusion.md, run_commands.txt.
+#                       재생성되지 않으므로 out/ 을 지워도 남는다.

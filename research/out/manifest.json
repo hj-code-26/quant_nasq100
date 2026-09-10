@@ -1,0 +1,54 @@
+{
+  "git_commit": "2417a171aa7f469c23344327576bbc76b752fee1",
+  "git_dirty_files": [
+    "research/"
+  ],
+  "python": "3.11.2",
+  "platform": "Windows-10-10.0.26200-SP0",
+  "numpy": "2.3.5",
+  "pandas": "3.0.3",
+  "data_source": "토스증권 Open API 일봉 (data_cache/*.pkl, 오프라인 캐시)",
+  "data_files": 101,
+  "data_sha256": "7e7cf2a8614ac2d14fcd61af4b7ba6d4d9471f7dc3cfa852f670c061a4508507",
+  "universe": "nasdaq100.TICKERS — **오늘(2026-09) 기준 구성종목**. point-in-time 아님 → 생존 편향 잔존",
+  "universe_asof": "2026-09 (편입/편출 이력 없음)",
+  "panel_symbols": 101,
+  "panel_start": "2023-08-09",
+  "panel_end": "2026-09-08",
+  "panel_rows": 773,
+  "open_missing_pct": 2.978,
+  "warmup_rows": 20,
+  "seed": 20260910,
+  "cash0": 10000.0,
+  "currency": "USD (원화 환산 없음, 단리 아님·복리 누적수익)",
+  "cost_default_bp_oneway": 25,
+  "regime_indicator": {
+    "⓪운영설정": "사용 안 함",
+    "①손절15+모멘텀0": "사용 안 함",
+    "④손절25+모멘텀0+회전가드": "사용 안 함",
+    "BASE(결정적 기준선)": "사용 안 함",
+    "C1": "사용 안 함",
+    "C2": "사용 안 함",
+    "C3": "QQQ 60일 수익률(운영 기본) + 유니버스 60일 중앙값(운영 폴백) 병행",
+    "note": "국면 판정을 쓰는 실험은 C3 뿐이다 — 나머지는 QQQ 부재의 영향을 받지 않는다",
+    "source_file": "research/out/regime_source.csv"
+  },
+  "qqq_history": "research/data/QQQ_1d.pkl (Yahoo Finance via yfinance, 무료·비상업. 유료 구매·브로커 API·신규 토큰 발급 없음). meta: research/data/QQQ_1d.meta.json",
+  "availability_model": "research/engine.py AVAILABILITY — 입력별 available_at. 일괄 shift 아님. 정수 주문은 t-1 종가로 수량 산정",
+  "isolation": "research/isolation.py — 자격증명 제거·운영 경로 쓰기 차단·브로커 요청 차단·로그 리다이렉트·WAL 포함 지문 검증",
+  "mode_c_scope": "연구 기준 엔진. 하루 1회 개장 시장가 체결 가정. 실전 다회 실행(프리/애프터장 지정가·LLM 재량)과 동등하지 않다",
+  "modes": {
+    "A": "판정=t종가, 체결=t종가 (원본·비현실적 진단 대조군)",
+    "B": "판정=t종가, 체결=t시가, 신호=t-1 (현 저장소 엔진, 잔여 누수 있음)",
+    "C": "판정=t-1종가, 체결=t시가, 신호=t-1 (엄밀 인과)"
+  },
+  "equivalence_vs_backtest_daily_sim": "PASS (A·B 자산곡선 완전 일치)",
+  "isolation_verify": {
+    "changed": [
+      "autotrade.log"
+    ],
+    "blocked_attempts": 2,
+    "watched": 145,
+    "ok": false
+  }
+}
