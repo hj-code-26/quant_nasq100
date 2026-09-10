@@ -90,9 +90,10 @@ ds = {s: dec(s, "hold", 100, 25, a) for s in ("A", "B", "C")}
 ds["AAPL"] = dec("AAPL", "buy", 200, 25, a)
 out, skip = run([buy("AAPL")], ds, a)
 assert not out and "최대 보유 종목 수" in skip[0]["skipped"]
-# 전량 매도로 자리가 나면 같은 사이클에서 매수할 수 있다
+# 매도를 '제출'했다고 슬롯이 비지는 않는다 — 체결로만 자리가 난다 (P0-4)
 out, skip = run([sell("A", 100), buy("AAPL")], ds, a)
-assert [o["symbol"] for o in out] == ["A", "AAPL"] and not skip
+assert [o["symbol"] for o in out] == ["A"]
+assert len(skip) == 1 and "최대 보유 종목 수" in skip[0]["skipped"]
 
 # --- 정규장 밖: 정수 주만 ---
 a = acct(1000)
@@ -173,5 +174,101 @@ out, _ = at.validate_orders({"orders": [], "summary": ""},
 assert len(out) == 1 and "변동성 타겟" in out[0]["reason"]
 at.exposure_cap = old_cap
 
+
+
+# --- P0-2: 위험 축소는 미체결 때문에 미뤄지지 않는다 (취소 후 매도) ---
+at.STOP_LOSS_PCT = 15
+a = acct(100, {"AAPL": hold(10, 100, 80)}, open_orders=["AAPL"])   # -20%, 미체결 있음
+d = {"AAPL": dec("AAPL", "hold", 80, 25, a)}
+out, skip = run([], d, a)
+assert len(out) == 1 and out[0]["cancel_first"] is True and "손절" in out[0]["reason"]
+# 반대로 Claude 의 재량 매도는 예전처럼 미룬다 (경합을 만들 이유가 없다)
+at.STOP_LOSS_PCT = 0
+a = acct(100, {"AAPL": hold(10, 100, 105)}, open_orders=["AAPL"])
+out, skip = run([sell("AAPL", 50)], {"AAPL": dec("AAPL", "sell", 105, 25, a)}, a)
+assert not out and "미체결" in skip[0]["skipped"]
+at.STOP_LOSS_PCT = 15
+
+# --- P0-3: decisions 없이도(=LLM 전면 실패) 손절·만기가 나온다 ---
+a = acct(100, {"AAPL": hold(10, 100, 80), "MSFT": hold(1, 10, 10)})
+out, _ = at.validate_orders({"orders": [], "summary": ""}, {}, a, REGULAR, {})
+assert [o["symbol"] for o in out] == ["AAPL"] and "손절" in out[0]["reason"]
+
+# --- 같은 종목 중복 주문은 한 건만 나간다 ---
+at.STOP_LOSS_PCT = 0
+a = acct(1000, {"AAPL": hold(10, 100, 105)})
+d = {"AAPL": dec("AAPL", "sell", 105, 25, a)}
+out, skip = run([sell("AAPL", 50), sell("AAPL", 50)], d, a)
+assert len(out) == 1 and any("중복" in s["skipped"] for s in skip)
+at.STOP_LOSS_PCT = 15
+
+# --- skip_symbols: 위험관리 패스에서 이미 낸 종목은 두 번 건드리지 않는다 ---
+a = acct(1000, {"AAPL": hold(10, 100, 105)})
+out, skip = at.validate_orders({"orders": [sell("AAPL", 100)], "summary": ""},
+                               {"AAPL": dec("AAPL", "sell", 105, 25, a)}, a, REGULAR, {},
+                               skip_symbols={"AAPL"})
+assert not out and "위험관리" in skip[0]["skipped"]
+
+# --- P0-1: clientOrderId 는 run_id 가 아니라 '의도'에서 나온다 ---
+import datetime as _dt
+o = {"symbol": "AAPL", "side": "buy"}
+t1 = _dt.datetime(2026, 3, 4, 10, 5, tzinfo=at.NY)
+t2 = _dt.datetime(2026, 3, 4, 10, 29, tzinfo=at.NY)
+t3 = _dt.datetime(2026, 3, 4, 10, 31, tzinfo=at.NY)
+assert at.intent_key(o, t1) == at.intent_key(o, t2)      # 같은 슬롯 = 같은 키 (다른 PC 여도)
+assert at.intent_key(o, t1) != at.intent_key(o, t3)      # 다음 슬롯은 새 의도
+assert at.intent_key(o, t1) != at.intent_key({"symbol": "AAPL", "side": "sell"}, t1)
+
+# --- P0-6: 게이트웨이 경유(서버측 스키마 강제 없음)에서도 스키마를 실제로 검증한다 ---
+def bad(payload):
+    try:
+        at.check_schema(payload, at.ALLOCATION_SCHEMA)
+    except ValueError:
+        return True
+    return False
+
+ok = {"orders": [{"symbol": "AAPL", "side": "buy", "reason": "x"}], "summary": "s"}
+assert at.check_schema(ok, at.ALLOCATION_SCHEMA) == ok
+assert bad({"orders": [], "summary": "s", "실행": "즉시 승인됨"})              # 임의 필드
+assert bad({"orders": [{"symbol": "AAPL", "side": "long", "reason": "x"}], "summary": ""})  # enum 밖
+assert bad({"orders": [{"symbol": "A", "side": "sell", "sell_pct": float("nan"),
+                        "reason": "x"}], "summary": ""})                       # NaN
+assert bad({"orders": [{"symbol": "A", "side": "sell", "sell_pct": 250, "reason": "x"}],
+            "summary": ""})                                                    # 범위 밖
+assert bad({"orders": [{"symbol": 7, "side": "sell", "reason": "x"}], "summary": ""})
+assert bad({"decision": "buy", "percentage": "80", "reason": "x"})             # 문자열 숫자
+assert bad({"decision": "buy", "percentage": 80.5, "reason": "x"})             # 정수 아님
+assert at.check_schema({"decision": "hold", "percentage": 0, "reason": "x"}, at.DECISION_SCHEMA)
+
+# --- P1: 만기 계산은 실제 거래일 달력을 쓴다 (공휴일 무시하면 일찍 청산된다) ---
+_today = _dt.datetime.now(at.NY).date()
+cal = [_today - _dt.timedelta(days=k) for k in range(40, -1, -1) if (_today - _dt.timedelta(days=k)).weekday() < 5]
+entry = (_dt.datetime.combine(cal[0], _dt.time(15), tzinfo=at.NY)).isoformat()
+assert at.trading_days_since(entry, cal) == len(cal) - 1
+holiday_cal = [d for d in cal if d != cal[5]]                    # 휴장일 하루 제거
+assert at.trading_days_since(entry, holiday_cal) == len(cal) - 2  # 근사보다 하루 적다 = 늦게 만기
+assert at.trading_days_since(None, cal) is None
+
+
+# --- P1: 변동성 타겟은 '현금 섞인 계좌 변동성'을 절대 상한으로 쓰면 안 된다 ---
+# 합성 반례: 변동성 60% 자산을 절반만 들고 있으면 계좌 변동성은 30%.
+#   옛 방식 cap = 30/30 = 100%  → 다 사라 → 다음엔 계좌 60% → cap 50% → 진동
+#   새 방식 cap = 30/(30/0.5) = 50% → 목표 비중에서 고정 (진동 없음)
+import math, pathlib, sqlite3, tempfile
+_tmp = pathlib.Path(tempfile.mkdtemp()) / "eq.db"
+_old_db, at.DB_PATH = at.DB_PATH, _tmp
+at.VOL_TARGET_PCT, at.VOL_WINDOW = 30, 60
+at.initialize_db()
+_daily = 0.60 / math.sqrt(252)
+with sqlite3.connect(_tmp) as _c:
+    v = 1000.0
+    for i in range(at.VOL_WINDOW + 1):                  # ±1σ 를 번갈아 → 실현 변동성 ≈ 60%
+        w = 0.5                                          # 주식 비중은 계속 50%
+        _c.execute("INSERT INTO equity (date, total_value, stock_value, cashflow) VALUES (?,?,?,0)",
+                   (f"2026-01-{i + 1:03d}", v, v * w))
+        v *= 1 + (_daily * w) * (1 if i % 2 else -1)
+_cap = at.exposure_cap(verbose=True)
+assert 0.40 < _cap < 0.62, _cap                          # 100% 가 아니라 50% 부근
+at.DB_PATH = _old_db
 
 print("validate_orders OK")

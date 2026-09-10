@@ -325,21 +325,26 @@ def exits_report(all_df, split_date, top=5, hold=20):
 
 
 def daily_panel(refresh=False):
-    """종가·20일 수익률 패널 (날짜 × 종목). 지표는 필요 없어 features() 를 건너뛴다."""
-    closes = {}
+    """종가·시가·20일 수익률 패널 (날짜 × 종목). 지표는 필요 없어 features() 를 건너뛴다."""
+    closes, opens = {}, {}
     for sym in TICKERS:
         try:
             df = load(sym, refresh)
             if len(df) >= 120:
-                closes[sym] = df["close"]
+                closes[sym], opens[sym] = df["close"], df["open"]
         except Exception as e:  # noqa: BLE001
             print(f"{sym} 실패: {e}", file=sys.stderr)
     close = pd.DataFrame(closes).sort_index()
-    return close, close.pct_change(20) * 100
+    return close, pd.DataFrame(opens).reindex_like(close), close.pct_change(20) * 100
 
 
-def daily_sim(close, ret20, cfg, cash0=10000.0):
-    """계좌 단위 일별 시뮬. 매일 종가에 청산 → 진입 순으로 처리한다.
+def daily_sim(close, ret20, cfg, cash0=10000.0, opens=None):
+    """계좌 단위 일별 시뮬.
+
+    ★ 체결 시점 (P1): 신호는 t 일 **종가**로 만들고, 체결은 t+1 일 **시가**에 한다.
+      같은 종가 신호를 같은 종가에 이상적으로 체결하면 하루치 미래를 당겨쓰는 것이다
+      (opens=None 이면 옛 방식 = 같은 종가 체결. A/B 비교용으로만 남겨 둔다).
+      실전 대응: 신호는 마감 후 확정되고 주문은 다음 개장에 나간다.
     운영 코드와 같은 제약을 건다: 최대 종목 수, 종목당 비중 한도, 현금 유지 비중, 최소 주문 금액,
     왕복 비용. 소수점 주문 불가(frac=False)면 정수 주만 산다 — 소액 계좌에서 이게 제일 크게 문다."""
     top = cfg.get("top", 5)
@@ -350,6 +355,7 @@ def daily_sim(close, ret20, cfg, cash0=10000.0):
     sl = cfg.get("sl")                            # 평단 대비 -sl% 면 청산
     mom_exit = cfg.get("mom_exit", True)
     mom_th = cfg.get("mom_th", 0)                 # 20일 수익률이 이 값 미만이면 청산
+    hold_days = cfg.get("hold_days")              # 만기 청산 (운영의 MAX_HOLD_DAYS)
     entry_th = cfg.get("entry_th", 0)             # 20일 수익률이 이 값 초과일 때만 진입
     rotate_guard = cfg.get("rotate_guard", False)  # 갈아탈 후보 없으면 모멘텀 청산 보류
     frac = cfg.get("frac", True)
@@ -359,22 +365,34 @@ def daily_sim(close, ret20, cfg, cash0=10000.0):
     equity, trades, holds = [], [], []
     dates = close.index[20:]
     for n, t in enumerate(dates):
-        px, mo = close.loc[t], ret20.loc[t]
+        if opens is None:                         # 옛 방식: 신호 종가 = 체결가
+            px = fill = close.loc[t]
+            mo = ret20.loc[t]
+        else:                                     # 실전 방식: 전날 종가 신호 → 오늘 시가 체결
+            if n == 0:
+                equity.append(cash)
+                continue
+            prev = dates[n - 1]
+            mo, px, fill = ret20.loc[prev], close.loc[t], opens.loc[t]
+            fill = fill.where(fill.notna(), px)    # 시가 결측이면 종가로 (조기폐장·데이터 공백)
         cands = [s for s in mo.dropna().sort_values(ascending=False).index
-                 if mo[s] > entry_th and s not in pos and pd.notna(px.get(s))]
+                 if mo[s] > entry_th and s not in pos and pd.notna(fill.get(s))]
         for sym in list(pos):
-            p = px.get(sym)
-            if pd.isna(p):
+            p = px.get(sym)                        # 판정은 종가 기준
+            f = fill.get(sym)                      # 체결은 fill 기준
+            if pd.isna(p) or pd.isna(f):
                 continue
             qty, avg, since = pos[sym]
             why = None
-            if sl and p <= avg * (1 - sl / 100):
+            if hold_days and n - since >= hold_days:
+                why = "만기"
+            elif sl and p <= avg * (1 - sl / 100):
                 why = "손절"
             elif mom_exit and pd.notna(mo.get(sym)) and mo[sym] < mom_th:
                 why = None if (rotate_guard and not cands) else "모멘텀"
             if why:
-                cash += qty * p * (1 - cost)
-                trades.append((why, (p / avg - 1) * 100)); holds.append(n - since)
+                cash += qty * f * (1 - cost)
+                trades.append((why, (f / avg - 1) * 100)); holds.append(n - since)
                 del pos[sym]
         if n % rebal:
             equity.append(cash + sum(q * px.get(s, a) for s, (q, a, _) in pos.items()))
@@ -384,7 +402,9 @@ def daily_sim(close, ret20, cfg, cash0=10000.0):
                 break
             total = cash + sum(q * px.get(s, a) for s, (q, a, _) in pos.items())
             budget = min(total * max_pos_pct / 100, cash - total * reserve / 100)
-            p = px[sym]
+            p = fill.get(sym)
+            if pd.isna(p):
+                continue
             qty = budget / p / (1 + cost) if frac else float(int(budget / p / (1 + cost)))
             if qty <= 0 or qty * p < min_usd:
                 continue
@@ -407,13 +427,15 @@ def daily_sim(close, ret20, cfg, cash0=10000.0):
 
 def daily_report(refresh=False):
     """규칙 조합별 계좌 단위 성적. 탐색 / 검증 구간을 나눠 같은 표로 낸다."""
-    close, ret20 = daily_panel(refresh)
+    close, opens, ret20 = daily_panel(refresh)
     split = close.index[int(len(close) * 2 / 3)]
     print(f"종목 {close.shape[1]}개, 기간 {close.index[0].date()} ~ {close.index[-1].date()}, "
           f"검증 구간 시작 {split.date()}")
     print("### ⑪ 계좌 단위 일별 시뮬 — 초기 $10,000, 편도 비용 0.25%, 최대 5종목·종목당 30%·현금 10% 유지")
 
     rules = {
+        "⓪ 현재 운영 설정 (만기20·10슬롯·15%)": dict(sl=None, mom_exit=False, hold_days=20,
+                                             top=10, max_pos_pct=15),
         "① 현재 운영 (손절15+모멘텀0)":      dict(sl=15, mom_exit=True),
         "② 손절 25 + 모멘텀 0":            dict(sl=25, mom_exit=True),
         "③ 손절 없음 + 모멘텀 0":           dict(sl=None, mom_exit=True),
@@ -424,17 +446,29 @@ def daily_report(refresh=False):
         "⑧ ④ + 주 1회 진입(rebal 5)":      dict(sl=25, mom_exit=True, rotate_guard=True, rebal=5),
         "⑨ ④ 를 소수점 주문 없이 (정수 주)":   dict(sl=25, mom_exit=True, rotate_guard=True, frac=False),
     }
+    print("  체결: 신호=전일 종가, 체결=당일 시가 (같은 종가 체결의 하루 선행 편향 제거)")
     for label, sub in (("탐색", close.loc[:split]), ("검증", close.loc[split:])):
         r20 = ret20.loc[sub.index]
+        op = opens.loc[sub.index]
         print(f"\n[{label} 구간 {sub.index[0].date()}~{sub.index[-1].date()}]"
               f"  {'규칙':32} {'총수익':>8} {'CAGR':>8} {'MDD':>8} {'Sharpe':>7} {'거래':>5} {'승률':>6} {'보유일':>6} {'손절%':>6}")
         bh = (sub.iloc[-1] / sub.iloc[0] - 1).mean() * 100          # 유니버스 동일비중 보유
         for name, cfg in rules.items():
-            m = daily_sim(sub, r20, cfg)
+            m = daily_sim(sub, r20, cfg, opens=op)
             print(f"{'':11}{name:32} {m['총수익'] * 100:+7.1f}% {m['CAGR'] * 100:+7.1f}% "
                   f"{m['MDD'] * 100:+7.1f}% {m['Sharpe']:7.2f} {m['거래']:5d} {m['승률']:5.1f}% "
                   f"{m['평균보유일']:6.1f} {m['손절%']:5.1f}%")
         print(f"{'':11}{'(기준: 나스닥100 동일비중 보유)':32} {bh:+7.1f}%")
+
+    # A vs B: 원본 엔진(같은 종가 체결)과 실전 체결(다음 시가)의 차이만 분리해서 본다.
+    print()
+    print("[A/B — 체결 가정만: A=신호 종가에 그대로 체결(원본), B=다음 시가 체결]")
+    for name in ("⓪ 현재 운영 설정 (만기20·10슬롯·15%)", "① 현재 운영 (손절15+모멘텀0)",
+                 "④ 손절 25 + 모멘텀 0 + 회전가드"):
+        a = daily_sim(close, ret20, rules[name])
+        b = daily_sim(close, ret20, rules[name], opens=opens)
+        print(f"{'':11}{name:32} A 총수익 {a['총수익'] * 100:+7.1f}% Sharpe {a['Sharpe']:5.2f} | "
+              f"B {b['총수익'] * 100:+7.1f}% {b['Sharpe']:5.2f} | Δ {(b['총수익'] - a['총수익']) * 100:+6.1f}%p")
 
     # 한 구간의 성적은 운일 수 있다. 6개월 창을 한 달씩 밀며 규칙끼리 직접 붙인다.
     print("\n[6개월 롤링 창 — 창별 수익률 중앙값과 기준선(동일비중) 대비 승률]")
@@ -444,7 +478,7 @@ def daily_report(refresh=False):
         rets, wins = [], 0
         for w in windows:
             sub = close.loc[w]
-            m = daily_sim(sub, ret20.loc[w], rules[name])
+            m = daily_sim(sub, ret20.loc[w], rules[name], opens=opens.loc[w])
             base = (sub.iloc[-1] / sub.iloc[0] - 1).mean()
             rets.append(m["총수익"]); wins += m["총수익"] > base
         print(f"{'':11}{name:32} 창 {len(windows)}개, 중앙값 {np.median(rets) * 100:+6.1f}%, "
@@ -453,7 +487,8 @@ def daily_report(refresh=False):
     # 소액 계좌: 정수 주 제약 + 최소 주문 금액이 실제로 얼마나 무는지
     print("\n[계좌 규모별 — ④ 규칙, 소수점 주문 불가(정규장 외) 가정]")
     for cash0 in (500, 2000, 10000, 50000):
-        m = daily_sim(close, ret20, dict(rules["④ 손절 25 + 모멘텀 0 + 회전가드"], frac=False), cash0)
+        m = daily_sim(close, ret20, dict(rules["④ 손절 25 + 모멘텀 0 + 회전가드"], frac=False),
+                      cash0, opens=opens)
         print(f"{'':11}초기 ${cash0:>6,}  총수익 {m['총수익'] * 100:+7.1f}%  거래 {m['거래']:3d}  "
               f"MDD {m['MDD'] * 100:+6.1f}%")
 def simulate_exits(series, picks, hold=None, mom_below=None, cap=None, sl=None, cap_days=250):

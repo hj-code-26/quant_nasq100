@@ -70,6 +70,9 @@ STOP_LOSS_PCT = float(os.environ.get("STOP_LOSS_PCT", 0))    # 평단 대비 -N%
 # 기본 꺼짐: -10~-30% 전 구간에서 성적이 나빠졌다. -25%는 검증 Sharpe 1.34→0.95, CAGR 33.0→24.2%
 MOMENTUM_EXIT = os.environ.get("MOMENTUM_EXIT", "0") == "1"  # 20일 수익률 음전 시 전량 매도.
 # 기본 꺼짐: 같은 백테스트에서 MAX_HOLD_DAYS 만기 청산(승률 56.4%)이 모멘텀 청산(42.1%)보다 우위였다
+# 스크리닝~배분(LLM 왕복)이 이 시간을 넘기면 시세·계좌가 낡은 것으로 보고 **신규 진입만** 막는다.
+# 위험 축소(손절·만기·노출)는 낡아도 계속 나간다 — 막아야 할 것은 낡은 값으로 사는 일이다.
+STALE_MAX_MIN = float(os.environ.get("STALE_MAX_MIN", 20))
 WORKERS = int(os.environ.get("WORKERS", 3))               # 종목별 판단 병렬 수 (Claude 속도 제한 고려)
 # 아래 셋은 1998~2026 나스닥100 백테스트(탐색 1999~2014 / 검증 2015~2026)에서 나온 값이다.
 # 근거는 backtest_bear.py, backtest_slots.py, backtest_regimes.py 참고.
@@ -135,6 +138,10 @@ def initialize_db():
             status TEXT, reason TEXT);
         CREATE TABLE IF NOT EXISTS equity (
             date TEXT PRIMARY KEY, total_value REAL, timestamp TEXT);""")
+        ecols = [r[1] for r in conn.execute("PRAGMA table_info(equity)")]
+        for col, typ in (("stock_value", "REAL"), ("cashflow", "REAL")):
+            if col not in ecols:
+                conn.execute(f"ALTER TABLE equity ADD COLUMN {col} {typ}")
         cols = [r[1] for r in conn.execute("PRAGMA table_info(trading_decisions)")]
         if "run_id" not in cols:   # 단일 종목 버전 DB 호환
             conn.execute("ALTER TABLE trading_decisions ADD COLUMN run_id INTEGER")
@@ -146,45 +153,79 @@ def initialize_db():
                 conn.execute(f"ALTER TABLE runs ADD COLUMN {col} {typ}")
 
 
-def log_equity(total_value):
-    """하루에 한 줄, 그 날 마지막 총자산. 변동성 타겟이 쓰는 유일한 이력이다."""
+def log_equity(total_value, stock_value=None):
+    """하루에 한 줄, 그 날 마지막 총자산과 주식 평가액. 변동성 타겟이 쓰는 유일한 이력이다.
+
+    cashflow(그 날의 입금+/출금-)는 **코드가 채우지 않는다** — 토스 Open API 에 입출금
+    조회가 없어서 자동 판별이 불가능하다. 입출금·환전을 했으면 그 날 행의 cashflow 를
+    직접 채워야 수익률이 오염되지 않는다. 안 채우면 exposure_cap 이 큰 점프를 경고한다.
+    """
     if not total_value:
         return
     today = datetime.datetime.now(NY).date().isoformat()   # 미국 거래일 기준
     with sqlite3.connect(DB_PATH) as conn:
-        conn.execute("INSERT INTO equity (date, total_value, timestamp) VALUES (?, ?, ?) "
+        conn.execute("INSERT INTO equity (date, total_value, stock_value, timestamp) "
+                     "VALUES (?, ?, ?, ?) "
                      "ON CONFLICT(date) DO UPDATE SET total_value=excluded.total_value, "
-                     "timestamp=excluded.timestamp", (today, float(total_value), _now()))
+                     "stock_value=excluded.stock_value, timestamp=excluded.timestamp",
+                     (today, float(total_value),
+                      None if stock_value is None else float(stock_value), _now()))
 
 
 def exposure_cap(verbose=False):
     """주식에 둘 수 있는 최대 비중(0~1). 자산 이력이 모자라면 None (기능 비활성).
 
-    계좌 일별 수익률의 최근 VOL_WINDOW 일 실현 변동성을 연율화해, 목표를 넘는 만큼
-    노출을 깎는다. 레버리지는 없다 (상한 1.0).
+    ★ 계좌 변동성에는 **이미 현금 비중이 섞여 있다.** target/account_vol 을 그대로 절대
+      상한으로 쓰면 되먹임이 뒤집힌다: 현금이 많은 날일수록 계좌 변동성이 낮아 상한이
+      커지고, 노출을 키우면 다시 변동성이 뛰어 상한이 줄어드는 진동이 생긴다.
+      (변동성 60% 자산·목표 30%: 50% 투자 → 계좌 30% → 상한 100% → 다음엔 계좌 60% →
+       상한 50% → …)
+      그래서 계좌 변동성을 같은 창의 **평균 주식 비중**으로 나눠 주식 자체의 변동성을
+      복원한 뒤 목표와 비교한다. 위 예에서는 상한이 50% 로 고정되어 진동하지 않는다.
+      (엄밀하게는 목표 포트폴리오 w 의 sqrt(w'Σw) 를 써야 하지만, 계좌 이력만으로는
+       Σ 를 복원할 수 없다. 단일 자산 근사임을 명시한다.)
+
+    입출금은 equity.cashflow 에서 빼고 계산한다 — 안 채워 두면 입금이 그대로 '수익률'로
+    잡혀 변동성이 부풀고 노출이 근거 없이 잘린다. 큰 점프는 경고를 남긴다.
     """
     if VOL_TARGET_PCT <= 0:
         return None
     try:
         with sqlite3.connect(DB_PATH) as conn:
-            vals = [r[0] for r in conn.execute(
-                "SELECT total_value FROM (SELECT date, total_value FROM equity "
-                "ORDER BY date DESC LIMIT ?) ORDER BY date", (VOL_WINDOW + 1,))]
+            rows = list(conn.execute(
+                "SELECT date, total_value, stock_value, COALESCE(cashflow, 0) FROM "
+                "(SELECT date, total_value, stock_value, cashflow FROM equity "
+                "ORDER BY date DESC LIMIT ?) ORDER BY date", (VOL_WINDOW + 1,)))
     except sqlite3.OperationalError:      # 첫 실행 — equity 테이블이 아직 없다
         return None
-    if len(vals) < VOL_WINDOW + 1:
+    if len(rows) < VOL_WINDOW + 1:
         return None
-    rets = [b / a - 1 for a, b in zip(vals, vals[1:]) if a]
+    rets = []
+    for (_, v0, _, _), (d1, v1, _, cf1) in zip(rows, rows[1:]):
+        if not v0:
+            continue
+        r = (v1 - cf1) / v0 - 1
+        if abs(r) > 0.25:                 # 하루 ±25% — 입출금·환전 미기재를 의심한다
+            log.warning("자산 이력 %s: 하루 %.1f%% 변동. 입출금이면 equity.cashflow 에 적어야 "
+                        "변동성이 오염되지 않는다", d1, r * 100)
+        rets.append(r)
     if len(rets) < 2:
         return None
     vol = (sum((r - sum(rets) / len(rets)) ** 2 for r in rets) / (len(rets) - 1)) ** 0.5
     vol_ann = vol * (252 ** 0.5) * 100
     if vol_ann <= 0:
         return None
-    cap = min(1.0, VOL_TARGET_PCT / vol_ann)
+    ws = [sv / tv for _, tv, sv, _ in rows if tv and sv is not None]
+    if not ws:                            # stock_value 를 안 남기던 옛 행뿐 — 계좌=주식 가정
+        log.warning("변동성 타겟: 주식 비중 이력이 없어 계좌 변동성을 그대로 쓴다 (상한이 느슨해짐)")
+        w = 1.0
+    else:
+        w = max(0.05, min(1.0, sum(ws) / len(ws)))   # 0 근처에서 상한이 발산하지 않게 하한
+    asset_vol = vol_ann / w               # 현금 희석을 되돌린 '주식 부분'의 변동성
+    cap = min(1.0, VOL_TARGET_PCT / asset_vol)
     if verbose:
-        log.info("변동성 타겟: 실현 %.1f%% / 목표 %.0f%% → 주식 노출 상한 %.0f%%",
-                 vol_ann, VOL_TARGET_PCT, cap * 100)
+        log.info("변동성 타겟: 계좌 실현 %.1f%% ÷ 평균 주식비중 %.0f%% = 주식 %.1f%% / 목표 %.0f%% "
+                 "→ 주식 노출 상한 %.0f%%", vol_ann, w * 100, asset_vol, VOL_TARGET_PCT, cap * 100)
     return cap
 
 
@@ -254,17 +295,33 @@ def position_entry_map(toss=None):
     return local
 
 
-def trading_days_since(ts):
-    """ts(ISO) 이후 흘러간 미국 거래일 수. 주말만 제외한 근사치 (휴장일은 무시)."""
+# 실제 거래일 달력 (미국). run_cycle 이 지수 일봉에서 채운다 — 휴장일·조기폐장이 반영된
+# 유일한 출처다. 비어 있으면 주말만 빼는 근사로 떨어진다 (만기가 최대 며칠 일찍 온다).
+TRADING_DAYS = []
+
+
+def trading_days_since(ts, calendar=None):
+    """ts(ISO) 이후 지나간 미국 거래일 수.
+
+    calendar 가 있으면(=거래소 일봉이 존재하는 날짜) 공휴일·조기폐장이 그대로 반영된다.
+    없으면 주말만 빼는 근사라 휴장일마다 만기가 하루씩 앞당겨진다.
+
+    lot age 정책: '현 보유분을 처음 산 시각'부터 센다(position_entry_map). 추가 매수는
+    시계를 리셋하지 않고(=최초 진입 기준), 전량 청산 후 재진입하면 새로 시작한다.
+    부분 매도는 남은 수량의 나이를 유지한다.
+    """
     if not ts:
         return None
     try:
         start = datetime.datetime.fromisoformat(ts).astimezone(NY).date()
     except ValueError:
         return None
+    cal = TRADING_DAYS if calendar is None else calendar
+    today = datetime.datetime.now(NY).date()
+    if cal:
+        return sum(1 for d in cal if start < d <= today)
     days = 0
     cur = start
-    today = datetime.datetime.now(NY).date()
     while cur < today:
         cur += datetime.timedelta(days=1)
         if cur.weekday() < 5:
@@ -482,6 +539,52 @@ def estimate_cost(model, input_tokens, output_tokens):
 
 
 # ---------- Claude ----------
+def check_schema(out, schema, path="응답"):
+    """받은 JSON 이 스키마를 실제로 지키는지 본다 (필수 키 존재 확인만으로는 부족하다).
+
+    게이트웨이(OmniRoute 등) 경유일 때는 서버 측 json_schema 강제를 못 걸어서
+    raw_decode 결과가 무검증으로 흘러든다. 임의 필드, 문자열 숫자, NaN/Inf,
+    범위 밖 비율, enum 밖 side 를 여기서 막는다.
+    """
+    t = schema.get("type")
+    if t == "object":
+        if not isinstance(out, dict):
+            raise ValueError(f"{path}: 객체가 아님")
+        props = schema.get("properties", {})
+        for k in schema.get("required", []):
+            if k not in out:
+                raise ValueError(f"{path}.{k} 없음")
+        if schema.get("additionalProperties") is False:
+            for k in out:
+                if k not in props:
+                    raise ValueError(f"{path}.{k}: 스키마에 없는 필드")
+        for k, v in out.items():
+            if k in props:
+                check_schema(v, props[k], f"{path}.{k}")
+    elif t == "array":
+        if not isinstance(out, list):
+            raise ValueError(f"{path}: 배열이 아님")
+        for i, v in enumerate(out):
+            check_schema(v, schema["items"], f"{path}[{i}]")
+    elif t == "string":
+        if not isinstance(out, str):
+            raise ValueError(f"{path}: 문자열이 아님")
+        if "enum" in schema and out not in schema["enum"]:
+            raise ValueError(f"{path}: {out!r} 는 {schema['enum']} 중 하나가 아님")
+    elif t in ("number", "integer"):
+        if isinstance(out, bool) or not isinstance(out, (int, float)):
+            raise ValueError(f"{path}: 숫자가 아님 ({out!r})")
+        if out != out or out in (float("inf"), float("-inf")):
+            raise ValueError(f"{path}: NaN/Inf")
+        if t == "integer" and float(out) != int(out):
+            raise ValueError(f"{path}: 정수가 아님 ({out!r})")
+        if "minimum" in schema and out < schema["minimum"]:
+            raise ValueError(f"{path}: {out} < 최소 {schema['minimum']}")
+        if "maximum" in schema and out > schema["maximum"]:
+            raise ValueError(f"{path}: {out} > 최대 {schema['maximum']}")
+    return out
+
+
 def ask_claude(prompt_file, payload, schema, retries=1):
     """instructions 파일을 시스템 프롬프트로, payload(dict) 를 사용자 메시지로 보내 JSON 을 받는다."""
     client = anthropic.Anthropic(timeout=300, max_retries=2)
@@ -510,11 +613,11 @@ def ask_claude(prompt_file, payload, schema, retries=1):
                 raise RuntimeError(f"Claude 응답 거부: {resp.stop_details}")
             text = next(b.text for b in resp.content if b.type == "text")
             # 첫 JSON 객체만 읽는다 — 뒤에 설명 문장이나 두 번째 블록이 붙어도 무시
-            out, _ = json.JSONDecoder().raw_decode(text[text.find("{"):])
-            for k in schema["required"]:
-                if k not in out:
-                    raise ValueError(f"응답에 {k} 없음")
-            return out
+            start = text.find("{")
+            if start < 0:
+                raise ValueError("JSON 객체가 없음")
+            out, _ = json.JSONDecoder().raw_decode(text[start:])
+            return check_schema(out, schema)
         except (json.JSONDecodeError, ValueError, StopIteration) as e:
             last_err = e
             log.warning("Claude 응답 파싱 실패 (%d/%d): %s", attempt + 1, retries + 1, e)
@@ -535,7 +638,18 @@ MOMENTUM_TIERS = (   # (20일 수익률 하한 %, 포지션 크기 배수, 이�
 )
 
 
-def market_regime(toss, rows=None):
+def index_daily(toss):
+    """국면 판정·거래일 달력에 쓰는 지수 일봉. 한 사이클에 한 번만 받는다."""
+    if not BEAR_INDEX:
+        return None
+    try:
+        return candles(toss, BEAR_INDEX, "1d", 90)
+    except Exception as e:  # noqa: BLE001
+        log.warning("지수 %s 캔들 실패: %s", BEAR_INDEX, e)
+        return None
+
+
+def market_regime(toss, rows=None, df=None):
     """시장 국면. 지수(기본 QQQ) 60일 수익률이 BEAR_RET60_PCT 미만이면 '하락'.
 
     QQQ 는 ^NDX 를 사실상 그대로 따라간다 (1999~2026 60일 수익률 상관 0.9996,
@@ -543,14 +657,11 @@ def market_regime(toss, rows=None):
     (지수 판정과 90.7% 일치하지만 성적은 더 낮으므로 어디까지나 대비책이다).
     """
     ret60 = src = None
-    if BEAR_INDEX:
-        try:
-            df = candles(toss, BEAR_INDEX, "1d", 90)
-            if len(df) >= 61:
-                ret60 = (df["close"].iloc[-1] / df["close"].iloc[-61] - 1) * 100
-                src = BEAR_INDEX
-        except Exception as e:  # noqa: BLE001
-            log.warning("국면 판정용 %s 캔들 실패: %s", BEAR_INDEX, e)
+    if df is None and BEAR_INDEX:
+        df = index_daily(toss)
+    if df is not None and len(df) >= 61:
+        ret60 = (df["close"].iloc[-1] / df["close"].iloc[-61] - 1) * 100
+        src = BEAR_INDEX
     if ret60 is None and rows:
         vals = sorted(r["ret_60d_pct"] for r in rows if r.get("ret_60d_pct") is not None)
         if vals:
@@ -773,12 +884,18 @@ def forced_exits(decisions, account):
                 continue
             why = f"모멘텀 청산 규칙: 20일 수익률 {ret20:.1f}% (음수), 대체 후보 {len(rotate_to)}개"
         log.warning("강제 청산 %s — %s", sym, why)
-        out.append({"symbol": sym, "side": "sell", "sell_pct": 100, "reason": why})
+        out.append({"symbol": sym, "side": "sell", "sell_pct": 100, "reason": why,
+                    "forced": True})
     return out
 
 
-def validate_orders(plan, decisions, account, session, entries=None):
-    """Claude 의 주문 목록을 규칙으로 걸러 실제 낼 주문만 남긴다. 매도 먼저, 매수 나중."""
+def validate_orders(plan, decisions, account, session, entries=None, skip_symbols=()):
+    """Claude 의 주문 목록을 규칙으로 걸러 실제 낼 주문만 남긴다. 매도 먼저, 매수 나중.
+
+    plan 을 비우고 decisions={} 로 부르면 **LLM 없이도** 손절·만기·노출 축소만 뽑아낼 수
+    있다. run_cycle 은 이 형태로 위험 관리 패스를 먼저 돌린다 (P0-3).
+    skip_symbols 는 그 패스에서 이미 주문을 낸 종목 — 같은 사이클에서 두 번 건드리지 않는다.
+    """
     frac = fractional_allowed(session)
     pre = extended_hours(session)
     holdings = dict(account["holdings"])
@@ -819,7 +936,8 @@ def validate_orders(plan, decisions, account, session, entries=None):
                     continue
                 sells.append({
                     "symbol": sym, "side": "sell", "sell_pct": round(pct, 2),
-                    "reason": f"변동성 타겟 — 주식 노출 상한 {cap * 100:.0f}% 초과분 축소"})
+                    "reason": f"변동성 타겟 — 주식 노출 상한 {cap * 100:.0f}% 초과분 축소",
+                    "forced": True})
                 named.add(sym)
                 excess -= cut
 
@@ -834,16 +952,27 @@ def validate_orders(plan, decisions, account, session, entries=None):
                 continue
             held = trading_days_since((entries or {}).get(sym))
             if held is not None and held >= MAX_HOLD_DAYS:
-                sells.append({"symbol": sym, "side": "sell", "sell_pct": 100,
+                sells.append({"symbol": sym, "side": "sell", "sell_pct": 100, "forced": True,
                               "reason": f"보유 {held}거래일로 만기({MAX_HOLD_DAYS}) 도달 — 코드 강제 청산"})
                 log.info("만기 청산 %s: 보유 %d거래일", sym, held)
+    done = set()
     for o in sells:
         sym = str(o["symbol"]).upper()
         h = holdings.get(sym)
+        if sym in skip_symbols:
+            skip(o, "같은 사이클의 위험관리 패스에서 이미 주문함"); continue
+        if sym in done:
+            skip(o, "같은 종목 매도 중복"); continue
         if not h:
             skip(o, "보유하지 않은 종목"); continue
+        cancel_first = False
         if sym in account["open_orders"]:
-            skip(o, "미체결 주문 있음"); continue
+            # 위험 축소(손절·만기·노출)는 미체결 때문에 미룰 수 없다. 기존 주문을 취소하고,
+            # 취소/체결 결과를 대사한 뒤 **실제 매도 가능 수량**으로 낸다 (place_order → free_position).
+            if not o.get("forced"):
+                skip(o, "미체결 주문 있음"); continue
+            cancel_first = True
+            log.warning("위험 축소 %s: 미체결 주문을 취소하고 매도한다 — %s", sym, o["reason"])
         pct = min(100.0, max(0.0, float(o.get("sell_pct") or 0)))
         if pct <= 0:
             skip(o, "sell_pct 없음"); continue
@@ -856,19 +985,24 @@ def validate_orders(plan, decisions, account, session, entries=None):
         out.append({"symbol": sym, "side": "sell", "quantity": round(qty, 6),
                     "price": h["last_price"], "limit_price": limit,
                     "amount_usd": round(qty * h["last_price"], 2),
-                    "reason": o["reason"]})
-        if pct >= 100:
-            positions.discard(sym)
+                    "cancel_first": cancel_first, "reason": o["reason"]})
+        done.add(sym)
+        # ★ 슬롯은 여기서 비우지 않는다. 매도는 '제출'했을 뿐 체결이 아니고, 현금·슬롯은
+        #   체결로만 생긴다 (P0-4). 자리는 다음 사이클이 계좌를 다시 읽어서 쓴다.
     if cap is not None and total > 0:      # 노출 상한 안에서만 신규 매수
         room = total * cap - sum(h["market_value"] for h in holdings.values())
         cash_left = min(cash_left, max(0.0, room))
     for o in buys:
         sym = str(o["symbol"]).upper()
         d = decisions.get(sym)
-        if not d:
-            skip(o, "판단 대상이 아닌 종목"); continue
+        if sym in skip_symbols:
+            skip(o, "같은 사이클의 위험관리 패스에서 이미 주문함"); continue
         if sym in exited:
             skip(o, "같은 사이클에서 강제 청산된 종목"); continue
+        if sym in done:
+            skip(o, "같은 종목 주문 중복"); continue
+        if not d:
+            skip(o, "판단 대상이 아닌 종목"); continue
         if sym in account["open_orders"]:
             skip(o, "미체결 주문 있음"); continue
         if sym not in positions and len(positions) >= MAX_POSITIONS:
@@ -891,12 +1025,85 @@ def validate_orders(plan, decisions, account, session, entries=None):
                     "amount_usd": round(amount, 2), "reason": o["reason"]})
         cash_left -= amount
         positions.add(sym)
+        done.add(sym)
     return out, skipped
 
 
-def place_order(toss, run_id, o):
-    """토스 주문. clientOrderId 로 멱등성 확보 — 같은 run 에서 재시도해도 중복 주문이 안 난다."""
-    coid = f"at{run_id}-{o['symbol']}-{o['side']}"
+def intent_key(o, when=None):
+    """주문 의도의 고유 키 (clientOrderId).
+
+    예전엔 run_id 를 썼는데, run_id 는 **머신마다 다른 로컬 시퀀스**라 다른 PC·다른
+    프로세스가 같은 매수 의도를 각자 내면 서로 다른 id 가 되어 중복 주문이 그대로 나갔다.
+    이제는 의도 자체(미국 날짜 · 30분 슬롯 · 종목 · 방향)로 만든다. 같은 슬롯의 같은
+    의도는 어디서 내도 같은 id 가 되고, 거래소가 clientOrderId 중복을 거절해 준다.
+
+    한계(과장 금지): 30분 버킷은 스케줄이 대략 같은 시각에 도는 것을 전제한 근사이고,
+    두 프로세스가 정확히 동시에 제출하는 경합은 여기서 못 막는다 — 그건 브로커의 중복
+    거절에 의존한다. 단일 머신 락으로 다른 PC 까지 막았다고 말할 수 없다.
+    """
+    t = when or datetime.datetime.now(NY)
+    return f"at{t:%y%m%d}{t.hour:02d}{t.minute // 30 * 30:02d}{o['symbol']}{o['side'][0].upper()}"
+
+
+def find_order(toss, coid):
+    """clientOrderId 로 실제 접수 여부를 확인한다 — 제출 도중 타임아웃·연결 끊김이 나면
+    '주문이 안 나갔다'고 단정하지 말고 이걸로 대사한 뒤 재시도할지 정한다."""
+    for st in ("OPEN", "CLOSED"):
+        try:
+            for r in (toss.orders(st) or {}).get("orders") or []:
+                if r.get("clientOrderId") == coid:
+                    return r
+        except Exception as e:  # noqa: BLE001
+            log.warning("주문 대사(%s) 실패: %s", st, e)
+    return None
+
+
+def free_position(toss, symbol, timeout=20):
+    """미체결 주문을 취소하고 **실제 매도 가능 수량**을 돌려준다 (위험 축소 전용).
+
+    순서: 취소 요청 → 취소/체결 결과 대사 → sellable-quantity 재조회.
+    취소와 체결은 경합한다 — 취소가 거절되면 이미 체결된 것이므로, 판단은 항상
+    재조회 결과로 한다. 조회 자체가 실패하면 None (호출자는 계획 수량을 그대로 쓴다).
+    """
+    try:
+        opens = (toss.orders("OPEN", symbol=symbol) or {}).get("orders") or []
+    except Exception as e:  # noqa: BLE001
+        log.warning("%s 미체결 조회 실패: %s", symbol, e)
+        opens = []
+    for o in opens:
+        try:
+            toss.cancel_order(o["orderId"])
+        except TossError as e:
+            log.warning("%s 주문 %s 취소 거절 (이미 체결/취소?): %s", symbol, o.get("orderId"), e)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            if not ((toss.orders("OPEN", symbol=symbol) or {}).get("orders") or []):
+                break
+        except Exception as e:  # noqa: BLE001
+            log.warning("%s 취소 대사 실패: %s", symbol, e)
+            break
+        time.sleep(1)
+    else:
+        log.error("%s 미체결이 %d초 안에 정리되지 않았다 — 매도 가능한 만큼만 낸다", symbol, timeout)
+    try:
+        r = toss.sellable_quantity(symbol) or {}
+        q = r.get("sellableQuantity", r.get("quantity"))
+        return None if q is None else float(q)
+    except (TossError, TypeError, ValueError) as e:
+        log.warning("%s 매도가능 수량 조회 실패: %s", symbol, e)
+        return None
+
+
+def place_order(toss, o, coid=None):
+    """토스 주문. clientOrderId 는 intent_key — 같은 의도의 재시도·중복 제출을 막는다."""
+    coid = coid or intent_key(o)
+    if o.get("cancel_first"):
+        q = free_position(toss, o["symbol"])
+        if q is not None:
+            if q <= 0:
+                raise TossError(409, "no-sellable", f"{o['symbol']}: 매도 가능 수량 0")
+            o = {**o, "quantity": min(o["quantity"], q)}
     lim = o.get("limit_price")          # 프리장엔 시장가를 못 받아서 지정가로 낸다
     otype = "LIMIT" if lim else "MARKET"
     if o["side"] == "buy":
@@ -908,6 +1115,45 @@ def place_order(toss, run_id, o):
     q = f"{o['quantity']:.6f}".rstrip("0").rstrip(".")
     return toss.create_order(o["symbol"], "SELL", otype, price=lim,
                              quantity=q, client_order_id=coid)
+
+
+def place_all(toss, run_id, orders, dry, tag=""):
+    """주문을 내고 DB 에 남긴다. 의도를 **먼저** 기록하고(durable intent) 결과로 갱신하므로,
+    제출 중에 죽어도 다음 실행이 어떤 의도가 떠 있었는지 알 수 있다."""
+    for o in orders:
+        coid = intent_key(o)
+        row_id = db_insert("orders", {
+            "run_id": run_id, "timestamp": _now(), "symbol": o["symbol"], "side": o["side"],
+            "quantity": o["quantity"], "amount_usd": o["amount_usd"], "price": o["price"],
+            "order_id": coid, "status": "dry-run" if dry else "pending", "reason": o["reason"]})
+        if dry:
+            log.info("[dry-run]%s %s %s $%.2f (%s주)", tag, o["side"], o["symbol"],
+                     o["amount_usd"], o["quantity"])
+            continue
+        try:
+            r = place_order(toss, o, coid)
+            fields = {"order_id": r.get("orderId"), "status": "submitted"}
+            log.info("주문%s %s %s $%.2f → %s", tag, o["side"], o["symbol"], o["amount_usd"],
+                     r.get("orderId"))
+        except TossError as e:
+            found = find_order(toss, coid)      # 정말 안 나갔는지 대사한다
+            if found:
+                fields = {"order_id": found.get("orderId"), "status": "submitted (대사 확인)"}
+                log.warning("주문%s %s %s: 오류(%s)였지만 실제로는 접수됨 — 재시도하지 않는다",
+                            tag, o["side"], o["symbol"], e)
+            else:
+                fields = {"status": f"error {e.code}: {e}"[:300]}
+                log.error("주문 실패%s %s %s: %s", tag, o["side"], o["symbol"], e)
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute("UPDATE orders SET " + ", ".join(f"{k}=?" for k in fields) +
+                         " WHERE id=?", [*fields.values(), row_id])
+
+
+def log_skipped(run_id, skipped):
+    for o in skipped:
+        db_insert("orders", {"run_id": run_id, "timestamp": _now(), "symbol": o.get("symbol"),
+                             "side": o.get("side"), "amount_usd": o.get("amount_usd"),
+                             "status": "skipped: " + o["skipped"], "reason": o.get("reason")})
 
 
 # ---------- 한 사이클 ----------
@@ -932,22 +1178,42 @@ def run_cycle(dry_run=None, force=False):
         db_update_run(run_id, total_value=account["total_value"], cash=account["cash"])
         log.info("계좌: 현금 $%.2f 총자산 $%.2f 보유 %s", account["cash"],
                  account["total_value"], list(account["holdings"]))
-        log_equity(account["total_value"])    # 변동성 타겟이 쓰는 일별 자산 이력
+        log_equity(account["total_value"],     # 변동성 타겟이 쓰는 일별 자산 이력
+                   sum(h["market_value"] for h in account["holdings"].values()))
         if VOL_TARGET_PCT > 0 and exposure_cap(verbose=True) is None:
             with sqlite3.connect(DB_PATH) as _c:
                 _n = _c.execute("SELECT COUNT(*) FROM equity").fetchone()[0]
             log.info("변동성 타겟 대기: 자산 이력 %d/%d일", _n, VOL_WINDOW + 1)
         entries = position_entry_map(toss)     # 계좌 기준 진입 시각 (다른 PC 주문도 포함)
+
+        # 0) 시장 국면 + 실제 거래일 달력 (지수 일봉 한 번으로 둘 다 해결한다)
+        idx = index_daily(toss)
+        global TRADING_DAYS
+        TRADING_DAYS = ([d.astimezone(NY).date() for d in idx.index] if idx is not None else [])
+        if not TRADING_DAYS:
+            log.warning("거래일 달력 없음 — 만기 계산이 주말만 빼는 근사로 떨어진다(휴장일만큼 이르게 청산)")
         log.info("보유 거래일수: %s", {s: trading_days_since(entries.get(s))
                                  for s in account["holdings"]})
 
-        # 0) 시장 국면 (하락 국면이면 선별 기준이 모멘텀 → 저변동성으로 바뀐다)
-        reg = market_regime(toss)
+        # 0-1) ★ 위험 관리 먼저. 손절·만기·노출 축소는 LLM 스크리닝이 실패하거나
+        #      느려도 반드시 나가야 한다 — 그래서 진입 분석보다 앞에서, LLM 없이 돌린다.
+        risk_orders, risk_skipped = validate_orders(
+            {"orders": [], "summary": ""}, {}, account, session, entries)
+        risk_symbols = {o["symbol"] for o in risk_orders}
+        if risk_orders:
+            log.warning("위험관리 주문 %d건 선제 실행: %s", len(risk_orders),
+                        [(o["symbol"], o["reason"][:30]) for o in risk_orders])
+            place_all(toss, run_id, risk_orders, dry, tag="[위험관리]")
+            log_skipped(run_id, risk_skipped)
+            account = account_state(toss)      # 슬롯·현금은 체결로만 생긴다 — 다시 읽는다
+
+        reg = market_regime(toss, df=idx)
         regime = reg["regime"]
         log.info("국면: %s (%s 60일 %s%%, 기준 %s%%)", regime, reg["source"],
                  reg["ret_60d_pct"], BEAR_RET60_PCT)
 
         # 1) 스크리닝
+        t_snapshot = time.time()
         rows = screen(toss, regime=regime)
         if regime == "하락":
             reg = market_regime(toss, rows) if reg["ret_60d_pct"] is None else reg
@@ -977,31 +1243,19 @@ def run_cycle(dry_run=None, force=False):
         # 3) 배분 → 검증 → 주문
         plan = allocate(decisions, account, session, regime, entries)
         log.info("배분 요약: %s", plan["summary"])
-        orders, skipped = validate_orders(plan, decisions, account, session, entries)
-        for o in orders:
-            row = {"run_id": run_id, "timestamp": _now(), "symbol": o["symbol"], "side": o["side"],
-                   "quantity": o["quantity"], "amount_usd": o["amount_usd"], "price": o["price"],
-                   "reason": o["reason"]}
-            if dry:
-                row |= {"status": "dry-run"}
-                log.info("[dry-run] %s %s $%.2f (%s주)", o["side"], o["symbol"],
-                         o["amount_usd"], o["quantity"])
-            else:
-                try:
-                    r = place_order(toss, run_id, o)
-                    row |= {"order_id": r.get("orderId"), "status": "submitted"}
-                    log.info("주문 %s %s $%.2f → %s", o["side"], o["symbol"], o["amount_usd"],
-                             r.get("orderId"))
-                except TossError as e:
-                    row |= {"status": f"error {e.code}: {e}"}
-                    log.error("주문 실패 %s %s: %s", o["side"], o["symbol"], e)
-            db_insert("orders", row)
-        for o in skipped:
-            db_insert("orders", {"run_id": run_id, "timestamp": _now(), "symbol": o.get("symbol"),
-                                 "side": o.get("side"), "amount_usd": o.get("amount_usd"),
-                                 "status": "skipped: " + o["skipped"], "reason": o.get("reason")})
+        account = account_state(toss)          # LLM 왕복 동안 바뀐 현금·보유를 반영
+        stale = (time.time() - t_snapshot) / 60
+        if stale > STALE_MAX_MIN:
+            log.error("시세 스냅샷이 %.0f분 낡음 (>%.0f) — 신규 매수는 취소하고 매도만 낸다",
+                      stale, STALE_MAX_MIN)
+            plan["orders"] = [o for o in plan["orders"] if o.get("side") != "buy"]
+        orders, skipped = validate_orders(plan, decisions, account, session, entries,
+                                          skip_symbols=risk_symbols)
+        place_all(toss, run_id, orders, dry)
+        log_skipped(run_id, skipped)
         db_update_run(run_id, status="done", summary=plan["summary"])
-        log.info("=== run %d 완료: 주문 %d건, 제외 %d건 ===", run_id, len(orders), len(skipped))
+        log.info("=== run %d 완료: 주문 %d건(위험관리 %d건 포함), 제외 %d건 ===",
+                 run_id, len(orders) + len(risk_orders), len(risk_orders), len(skipped))
     except Exception as e:  # noqa: BLE001
         log.exception("run %d 실패: %s", run_id, e)
         db_update_run(run_id, status=f"error: {e}"[:300])
