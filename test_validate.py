@@ -269,6 +269,54 @@ with sqlite3.connect(_tmp) as _c:
         v *= 1 + (_daily * w) * (1 if i % 2 else -1)
 _cap = at.exposure_cap(verbose=True)
 assert 0.40 < _cap < 0.62, _cap                          # 100% 가 아니라 50% 부근
+
+
+# --- 오버레이: 하락 국면 노출 축소 (REGIME_DERISK). 기본값 OFF 가 지켜져야 한다 ---
+def _idx(closes):
+    return at.pd.DataFrame({"close": closes},
+                           index=at.pd.date_range("2025-01-01", periods=len(closes), freq="D"))
+
+FLAT, DROP = [100.0] * 260, [80.0] * 40                  # 252일 고점 100 → 현재 80 = -20%
+_bear = _idx(FLAT + DROP)
+
+at.BEAR_EXPOSURE_PCT, at.BEAR_DD_PCT, at.BEAR_OFF_DAYS = None, 15, 3
+assert at.bear_derisk(_bear) is None                     # ★ 기본값 OFF — 신호가 켜져도 개입 없음
+assert at.exposure_cap() == _cap                         # 상한도 변동성 타겟 그대로
+
+at.BEAR_EXPOSURE_PCT = 70
+assert at.bear_derisk(_bear) == 0.70                     # -20% ≤ -15% → ON
+assert at.bear_derisk(_idx(FLAT + [95.0] * 40)) is None   # -5% 는 임계 미달 → OFF
+assert at.bear_derisk(_idx(FLAT[:100])) is None          # 252봉 미만이면 판정 안 한다
+assert at.bear_derisk(None) is None                      # 지수를 못 받은 날도 안전하게 꺼진다
+
+# 복귀 지연: 오늘은 고점 회복이어도 최근 BEAR_OFF_DAYS 일 안에 ON 이 있으면 유지한다
+_rebound = _idx(FLAT + [80.0] * 38 + [100.0, 100.0])
+assert at.bear_derisk(_rebound) == 0.70                  # 2일 전이 ON → 지연 3일이라 유지
+at.BEAR_OFF_DAYS = 1
+assert at.bear_derisk(_rebound) is None                  # 지연 1일이면 오늘만 본다 → 해제
+at.BEAR_OFF_DAYS = 3
+
+# ★ 미래 참조 없음: 데이터를 t 에서 잘라도 t 의 판정이 바뀌면 안 된다
+for _k in (270, 285, 299):
+    assert at.bear_derisk(_bear.iloc[:_k]) == at.bear_derisk(_bear.iloc[:_k]), _k
+assert at.bear_derisk(_bear.iloc[:261]) == 0.70          # 하락 첫날에 이미 켜진다 (지연 없음)
+assert at.bear_derisk(_bear.iloc[:260]) is None          # 그 전날은 아직 아니다
+
+# 상한은 둘 중 낮은 쪽 — 겹쳐도 0~100% 를 벗어나지 않는다
+at.BEAR_CAP = at.bear_derisk(_bear)
+assert at.exposure_cap() == min(_cap, 0.70) == _cap      # 변동성 타겟 50% 가 더 낮다
+at.BEAR_EXPOSURE_PCT = 30
+at.BEAR_CAP = at.bear_derisk(_bear)
+assert at.exposure_cap() == 0.30                         # 이번엔 오버레이가 더 낮다
+
+# 축소 매도에 사유 코드가 남는가 (나중에 오버레이 기여를 분리하려면 필수)
+_a = acct(0, {"AAPL": hold(10, 100, 100)})               # 주식 100% → 상한 30% 초과
+_o, _ = run([], {}, _a)
+_r = [o for o in _o if "REGIME_DERISK" in o.get("reason", "")]
+assert _r and _r[0]["side"] == "sell", _o
+at.BEAR_CAP, at.BEAR_EXPOSURE_PCT = None, None           # 킬 스위치 — 기준선 동작으로 복귀
+assert at.exposure_cap() == _cap
+
 at.DB_PATH = _old_db
 
 print("validate_orders OK")

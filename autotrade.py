@@ -84,6 +84,21 @@ BEAR_RET60_PCT = float(os.environ.get("BEAR_RET60_PCT", -3))   # 60일 수익률
 VOL_TARGET_PCT = float(os.environ.get("VOL_TARGET_PCT", 30))
 VOL_WINDOW = int(os.environ.get("VOL_WINDOW", 60))         # 실현 변동성 계산 창 (거래일)
 
+# ---------- 오버레이: 하락 국면 노출 축소 (REGIME_DERISK) ----------
+# ★ 기본값 OFF. 켜려면 BEAR_EXPOSURE_PCT 에 값을 넣는다 (예: 70). 빈 값이면 기준선 동작.
+#   이 변수 하나가 킬 스위치다 — 비우면 오버레이가 전부 사라지고 기존 경로만 남는다.
+# 검증: backtest_bear_exposure.py. 판정 **ADOPT_LIMITED** (ADOPT 아님).
+#   통과: 방어 효과(전 구간 MDD -63.3%→-47.2%), 보험료(CAGR +0.1%p), Calmar 탐·검 동시 우위,
+#         회전율 감소(25.0x→24.4x), 비용 2배에서도 결론 유지
+#   미달: 다중검정 보정 후 유의성 없음(DSR 0.086, 기준 0.95), 부트스트랩 ΔMDD 95% 구간이
+#         0 을 걸침(-3.6 ~ +18.1%p), 인접 파라미터가 고원이 아니라 뾰족한 봉우리
+#   → 사람이 페이퍼·섀도로 확인하기 전에는 켜지 말 것. 권장 검증값은 70 / 15 / 3 이다.
+_bx = os.environ.get("BEAR_EXPOSURE_PCT", "").strip()
+BEAR_EXPOSURE_PCT = float(_bx) if _bx else None   # 하락 국면 주식 노출 상한 (%). None 이면 끔
+BEAR_DD_PCT = float(os.environ.get("BEAR_DD_PCT", 15))     # 지수 252일 고점 대비 이만큼 빠지면 ON
+BEAR_OFF_DAYS = int(os.environ.get("BEAR_OFF_DAYS", 3))    # OFF 가 N일 연속돼야 해제 (휩소 방지)
+BEAR_CAP = None      # 사이클마다 run_cycle 이 채운다. None = 오버레이 미적용
+
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")   # 윈도우 콘솔(cp949)에서 한글 로그가 깨지지 않게
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
@@ -173,7 +188,36 @@ def log_equity(total_value, stock_value=None):
 
 
 def exposure_cap(verbose=False):
-    """주식에 둘 수 있는 최대 비중(0~1). 자산 이력이 모자라면 None (기능 비활성).
+    """주식에 둘 수 있는 최대 비중(0~1). 제약이 하나도 없으면 None.
+
+    변동성 타겟(후행)과 하락 국면 오버레이(선행) 중 **더 낮은 쪽**을 쓴다. 둘은 겹쳐도
+    범위를 벗어나지 않는다 — min 이므로 0~100% 안에 갇힌다.
+    """
+    caps = [c for c in (_vol_target_cap(verbose), BEAR_CAP) if c is not None]
+    return min(caps) if caps else None
+
+
+def bear_derisk(df):
+    """하락 국면 노출 축소 오버레이 — ON 이면 허용 주식 비중(0~1), 아니면 None.
+
+    신호: 지수가 252거래일 고점 대비 BEAR_DD_PCT% 이상 빠졌으면 ON.
+          OFF 가 BEAR_OFF_DAYS 일 연속돼야 해제한다 (= 마지막 N일 중 하나라도 ON 이면 유지).
+    마지막 봉까지의 데이터만 본다 — 구조상 미래를 참조할 수 없다
+    (backtest_bear_exposure.check() 가 '데이터를 t 에서 잘라도 신호 불변'을 매 실행 검증한다).
+
+    현행 market_regime(60일 수익률 < -3%) 을 쓰지 않는 이유: 그 신호는 28년 중 ON 인 날만
+    모으면 지수가 **+41%** 다 (방어할 게 없는 구간에 켜진다). 이 신호는 -55% 다.
+    """
+    if BEAR_EXPOSURE_PCT is None or df is None or len(df) < 253:
+        return None
+    c = df["close"]
+    dd = (c / c.rolling(252).max() - 1) * 100
+    on = bool((dd <= -BEAR_DD_PCT).tail(max(BEAR_OFF_DAYS, 1)).any())
+    return BEAR_EXPOSURE_PCT / 100 if on else None
+
+
+def _vol_target_cap(verbose=False):
+    """변동성 타겟 상한(0~1). 자산 이력이 모자라면 None (기능 비활성).
 
     ★ 계좌 변동성에는 **이미 현금 비중이 섞여 있다.** target/account_vol 을 그대로 절대
       상한으로 쓰면 되먹임이 뒤집힌다: 현금이 많은 날일수록 계좌 변동성이 낮아 상한이
@@ -639,11 +683,15 @@ MOMENTUM_TIERS = (   # (20일 수익률 하한 %, 포지션 크기 배수, 이�
 
 
 def index_daily(toss):
-    """국면 판정·거래일 달력에 쓰는 지수 일봉. 한 사이클에 한 번만 받는다."""
+    """국면 판정·거래일 달력에 쓰는 지수 일봉. 한 사이클에 한 번만 받는다.
+
+    300봉을 받는다 — bear_derisk 의 252일 고점이 그만큼 필요하다. market_regime 은
+    뒤 61봉만 쓰므로 더 받아도 판정이 달라지지 않는다 (토스 상한은 750봉).
+    """
     if not BEAR_INDEX:
         return None
     try:
-        return candles(toss, BEAR_INDEX, "1d", 90)
+        return candles(toss, BEAR_INDEX, "1d", 300)
     except Exception as e:  # noqa: BLE001
         log.warning("지수 %s 캔들 실패: %s", BEAR_INDEX, e)
         return None
@@ -829,7 +877,11 @@ def planned_buy_amount(symbol, decisions, account):
 def allocate(decisions, account, session, regime="보통", entries=None):
     cap = exposure_cap()
     rules = {"최대 보유 종목 수": MAX_POSITIONS,
-             "주식 노출 상한 % (변동성 타겟)": round(cap * 100, 1) if cap is not None else "미적용", "종목당 최대 비중 % (총자산 대비)": MAX_POSITION_PCT,
+             "주식 노출 상한 %": round(cap * 100, 1) if cap is not None else "미적용",
+             "노출 상한을 묶은 제약": ("하락 국면 축소(REGIME_DERISK)"
+                              if BEAR_CAP is not None and cap is not None and cap >= BEAR_CAP
+                              else "변동성 타겟") if cap is not None else "없음",
+             "종목당 최대 비중 % (총자산 대비)": MAX_POSITION_PCT,
              "항상 남길 현금 비중 %": CASH_RESERVE_PCT, "최소 주문 금액 USD": MIN_ORDER_USD,
              "소수점(금액) 주문 가능": fractional_allowed(session),
              "장외(프리·애프터) 여부": extended_hours(session),
@@ -918,12 +970,15 @@ def validate_orders(plan, decisions, account, session, entries=None, skip_symbol
     # 백테스트는 전 종목 비례 축소였지만, 실전에서는 최소 주문 금액과 수수료 때문에
     # 큰 종목부터 깎는다 (주문 수가 줄고 집중도도 함께 낮아진다).
     cap = exposure_cap()
+    # 어느 제약이 상한을 묶었는지 — 사유 코드로 남겨야 나중에 오버레이 기여를 분리할 수 있다
+    src = ("REGIME_DERISK — 하락 국면 노출 상한" if BEAR_CAP is not None and cap >= BEAR_CAP
+           else "변동성 타겟 — 주식 노출 상한") if cap is not None else ""
     if cap is not None and total > 0:
         stock_value = sum(h["market_value"] for h in holdings.values())
         excess = stock_value - total * cap
         if excess > MIN_ORDER_USD:
-            log.info("노출 축소: 주식 %.1f%% → 상한 %.0f%%, %.2f 달러 줄인다",
-                     stock_value / total * 100, cap * 100, excess)
+            log.info("노출 축소(%s): 주식 %.1f%% → 상한 %.0f%%, %.2f 달러 줄인다",
+                     src.split(" —")[0], stock_value / total * 100, cap * 100, excess)
             named = {str(o["symbol"]).upper() for o in sells}
             for sym, h in sorted(holdings.items(), key=lambda kv: -kv[1]["market_value"]):
                 if excess <= MIN_ORDER_USD:
@@ -936,7 +991,7 @@ def validate_orders(plan, decisions, account, session, entries=None, skip_symbol
                     continue
                 sells.append({
                     "symbol": sym, "side": "sell", "sell_pct": round(pct, 2),
-                    "reason": f"변동성 타겟 — 주식 노출 상한 {cap * 100:.0f}% 초과분 축소",
+                    "reason": f"{src} {cap * 100:.0f}% 초과분 축소",
                     "forced": True})
                 named.add(sym)
                 excess -= cut
@@ -1180,7 +1235,7 @@ def run_cycle(dry_run=None, force=False):
                  account["total_value"], list(account["holdings"]))
         log_equity(account["total_value"],     # 변동성 타겟이 쓰는 일별 자산 이력
                    sum(h["market_value"] for h in account["holdings"].values()))
-        if VOL_TARGET_PCT > 0 and exposure_cap(verbose=True) is None:
+        if VOL_TARGET_PCT > 0 and _vol_target_cap(verbose=True) is None:
             with sqlite3.connect(DB_PATH) as _c:
                 _n = _c.execute("SELECT COUNT(*) FROM equity").fetchone()[0]
             log.info("변동성 타겟 대기: 자산 이력 %d/%d일", _n, VOL_WINDOW + 1)
@@ -1188,8 +1243,16 @@ def run_cycle(dry_run=None, force=False):
 
         # 0) 시장 국면 + 실제 거래일 달력 (지수 일봉 한 번으로 둘 다 해결한다)
         idx = index_daily(toss)
-        global TRADING_DAYS
+        global TRADING_DAYS, BEAR_CAP
         TRADING_DAYS = ([d.astimezone(NY).date() for d in idx.index] if idx is not None else [])
+        # 오버레이 상한은 위험관리 패스(바로 아래)보다 먼저 정해져야 한다 — 축소 매도가 거기서 난다
+        BEAR_CAP = bear_derisk(idx)
+        if BEAR_CAP is not None:
+            log.warning("REGIME_DERISK ON: %s 252일 고점 대비 -%.0f%% 이하 (최근 %d일) "
+                        "→ 주식 노출 상한 %.0f%%", BEAR_INDEX, BEAR_DD_PCT, BEAR_OFF_DAYS,
+                        BEAR_CAP * 100)
+        elif BEAR_EXPOSURE_PCT is not None:
+            log.info("REGIME_DERISK OFF (상한 %.0f%% 설정됐으나 신호 미점등)", BEAR_EXPOSURE_PCT)
         if not TRADING_DAYS:
             log.warning("거래일 달력 없음 — 만기 계산이 주말만 빼는 근사로 떨어진다(휴장일만큼 이르게 청산)")
         log.info("보유 거래일수: %s", {s: trading_days_since(entries.get(s))
