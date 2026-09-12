@@ -197,6 +197,15 @@ def exposure_cap(verbose=False):
     return min(caps) if caps else None
 
 
+def bear_data_ok(df):
+    """오버레이 신호를 **판정할 수 있는가**. 252일 고점 + 당일 = 253봉이 필요하다.
+
+    신호 OFF 와 판정 불가를 섞지 않으려고 따로 뒀다 — 지수를 못 받은 날 조용히 꺼지면
+    보호가 사라진 것을 로그에서 알아볼 수 없다.
+    """
+    return df is not None and len(df) >= 253
+
+
 def bear_derisk(df):
     """하락 국면 노출 축소 오버레이 — ON 이면 허용 주식 비중(0~1), 아니면 None.
 
@@ -208,7 +217,7 @@ def bear_derisk(df):
     현행 market_regime(60일 수익률 < -3%) 을 쓰지 않는 이유: 그 신호는 28년 중 ON 인 날만
     모으면 지수가 **+41%** 다 (방어할 게 없는 구간에 켜진다). 이 신호는 -55% 다.
     """
-    if BEAR_EXPOSURE_PCT is None or df is None or len(df) < 253:
+    if BEAR_EXPOSURE_PCT is None or not bear_data_ok(df):
         return None
     c = df["close"]
     dd = (c / c.rolling(252).max() - 1) * 100
@@ -1251,6 +1260,10 @@ def run_cycle(dry_run=None, force=False):
             log.warning("REGIME_DERISK ON: %s 252일 고점 대비 -%.0f%% 이하 (최근 %d일) "
                         "→ 주식 노출 상한 %.0f%%", BEAR_INDEX, BEAR_DD_PCT, BEAR_OFF_DAYS,
                         BEAR_CAP * 100)
+        elif BEAR_EXPOSURE_PCT is not None and not bear_data_ok(idx):
+            log.error("REGIME_DERISK 판정 불가 — 지수 %s 일봉 %s (253봉 필요). 신호가 꺼진 게"
+                      " 아니라 **평가하지 못했다**. 오버레이 없이(=축소 없이) 진행한다",
+                      BEAR_INDEX, "없음" if idx is None else f"{len(idx)}봉")
         elif BEAR_EXPOSURE_PCT is not None:
             log.info("REGIME_DERISK OFF (상한 %.0f%% 설정됐으나 신호 미점등)", BEAR_EXPOSURE_PCT)
         if not TRADING_DAYS:

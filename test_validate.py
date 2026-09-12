@@ -287,7 +287,9 @@ at.BEAR_EXPOSURE_PCT = 70
 assert at.bear_derisk(_bear) == 0.70                     # -20% ≤ -15% → ON
 assert at.bear_derisk(_idx(FLAT + [95.0] * 40)) is None   # -5% 는 임계 미달 → OFF
 assert at.bear_derisk(_idx(FLAT[:100])) is None          # 252봉 미만이면 판정 안 한다
-assert at.bear_derisk(None) is None                      # 지수를 못 받은 날도 안전하게 꺼진다
+assert at.bear_derisk(None) is None                      # 지수를 못 받은 날은 개입하지 않는다
+# ★ 판정 불가 ≠ 신호 OFF. 데이터가 없으면 보호가 조용히 사라지는 것이므로 구분해서 로그한다
+assert at.bear_data_ok(_bear) and not at.bear_data_ok(None) and not at.bear_data_ok(_idx(FLAT[:252]))
 
 # 복귀 지연: 오늘은 고점 회복이어도 최근 BEAR_OFF_DAYS 일 안에 ON 이 있으면 유지한다
 _rebound = _idx(FLAT + [80.0] * 38 + [100.0, 100.0])
