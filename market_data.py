@@ -22,10 +22,27 @@ INDEX = "^NDX"          # 나스닥 100 지수 — 방향 분류 기준 (지수 
 FIELDS = ("Open", "Close", "High", "Low", "Volume")
 
 
+def _warn_thin(close):
+    """최근 1년 관측이 거의 없는 티커를 경고한다.
+
+    야후는 상장폐지·비상장 전환된 회사의 이력을 **통째로 지운다**. 그러면 그 종목은
+    `backtest_rules.features` 의 관측수 필터에서 조용히 빠지고, 백테스트는 아무 말 없이
+    더 작은 유니버스로 돌아간다 (실제로 EA 가 그렇게 6봉만 남았다). 소리는 내야 한다.
+    """
+    recent = close.tail(252).notna().sum()
+    thin = sorted(recent[recent < 20].index)
+    if thin:
+        print(f"[market_data] 최근 1년 데이터가 거의 없는 티커 {len(thin)}개: {thin} "
+              f"— 야후에서 이력이 사라졌을 수 있다. 백테스트 유니버스에서 조용히 빠진다.",
+              file=sys.stderr)
+
+
 def load_ohlcv(refresh=False):
     """{'close','high','low','volume': DataFrame} — 인덱스=날짜, 컬럼=종목(+지수는 close 에만)."""
     if CACHE.exists() and not refresh:
-        return pickle.load(CACHE.open("rb"))
+        d = pickle.load(CACHE.open("rb"))
+        _warn_thin(d["close"])
+        return d
     import yfinance as yf
     syms = list(dict.fromkeys(list(TICKERS) + [INDEX]))
     print(f"yfinance 에서 {len(syms)}종목 {START}~ 일봉(OHLCV) 다운로드…", file=sys.stderr)
@@ -33,4 +50,5 @@ def load_ohlcv(refresh=False):
     out = {f.lower(): raw[f].dropna(how="all") for f in FIELDS}
     CACHE.parent.mkdir(exist_ok=True)
     pickle.dump(out, CACHE.open("wb"))
+    _warn_thin(out["close"])
     return out

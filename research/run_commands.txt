@@ -55,6 +55,11 @@ python research/index_freshness.py
 #       corr_cost_sensitivity.csv   결론: research/corr_conclusion.md
 python research/corr_limits.py
 
+# 13) PIT 구성종목(2015~) 재실행 — 검증 구간 편향 측정
+#     → pit_bias.csv, pit_missing.csv, pit_bootstrap.csv  결론: research/pit_conclusion.md
+python research/pit_universe.py --fetch    # 옛 구성종목 시세 (yfinance, 1회. 이미 받았으면 생략)
+python research/pit_universe.py
+
 # 격리 검증만 다시 보기
 python -c "import sys;sys.path.insert(0,'.');from research.isolation import verify;print(verify())"
 

@@ -3,6 +3,8 @@ __pycache__/
 # Yahoo Finance 캐시 — 재배포 금지 라이선스. 출처·해시는 meta.json 에 남기고
 # 데이터 자체는 커밋하지 않는다. 재생성: python research/fetch_index.py
 data/*.pkl
+# research/data/pit/*.pkl (yfinance 시세) 포함. YAML(MIT) 은 커밋한다
+data/**/*.pkl
 
 # 실행 부산물
 out/shadow_test.db
