@@ -335,7 +335,15 @@ def daily_panel(refresh=False):
         except Exception as e:  # noqa: BLE001
             print(f"{sym} 실패: {e}", file=sys.stderr)
     close = pd.DataFrame(closes).sort_index()
-    return close, pd.DataFrame(opens).reindex_like(close), close.pct_change(20) * 100
+    ret20 = close.pct_change(20) * 100
+    # ★ 당시 구성종목만 매수 후보로 (2015~). 보유 종목의 청산은 막지 않는다 — daily_sim 은
+    #   후보를 ret20 에서만 고르고 보유는 pos 에서 관리한다. PIT=0 이면 옛 방식.
+    #   한계: 토스 캐시에는 **오늘 유니버스의 일봉만** 있다. 그래서 여기서 걷히는 것은
+    #   '미래 편입 종목을 미리 사는' 전방 탐색뿐이고, 이미 빠져 사라진 종목은 되살리지 못한다.
+    import pit
+    ret20 = ret20.where(pd.DataFrame(pit.mask(close.index, list(close.columns)),
+                                     index=close.index, columns=close.columns))
+    return close, pd.DataFrame(opens).reindex_like(close), ret20
 
 
 def daily_sim(close, ret20, cfg, cash0=10000.0, opens=None):

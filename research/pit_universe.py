@@ -38,64 +38,15 @@ PRICES = DATA / "pit_prices.pkl"
 OUT = pathlib.Path(__file__).with_name("out")
 START = "2015-01-01"
 
-# 티커 변경 — 옛 티커의 지수 소속을 새 티커로 잇는다. 같은 회사이고, 새 티커의 yfinance
-# 이력이 옛 구간까지 (분할·배당 조정된 채로) 이어져 있는 경우에만 넣는다.
-RENAME = {"FB": "META",      # Facebook → Meta (2022). 새 티커 이력이 2012 까지 이어진다
-          "NLOK": "GEN",     # NortonLifeLock → Gen Digital (2022)
-          "CTRP": "TCOM",    # Ctrip → Trip.com (2019)
-          "WLTW": "WTW",     # Willis Towers Watson 티커 변경 (2022)
-          "DISCA": "WBD", "DISCK": "WBD"}   # Discovery 가 WarnerMedia 를 합치며 개명 —
-#   순수 개명은 아니지만 상장이 이어지고 yfinance 이력도 2014 까지 그대로다. 두 주식종류가
-#   한 칸으로 합쳐지는 것은 감수한다 (지수에 2칸이던 것이 1칸이 된다).
-# VIAB→PARA 는 넣지 않았다 — PARA 이력이 2021-02 부터라 구간이 끊긴다. 결손으로 남긴다.
+from pit import RENAME, events, mask as pit_mask   # 구성종목 로더는 최상위 pit.py 하나뿐이다
 
 
 def membership():
-    """{날짜: frozenset(티커)} 변경 시점만. YAML 은 BaseLoader 로 읽는다 — 'ON' 이 bool 이 되면 안 된다."""
-    ev = {}
-    for f in sorted(DATA.glob("n100-*.yaml")):
-        d = yaml.load(f.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
-        cur = set(d["tickers_on_Jan_1"])
-        ev[datetime.date(int(d["year"]), 1, 1)] = set(cur)
-        for ds, ch in sorted((d.get("changes") or {}).items()):
-            cur = (cur | set(ch.get("union", []))) - set(ch.get("difference", []))
-            ev[datetime.date.fromisoformat(str(ds))] = set(cur)
-    return dict(sorted(ev.items()))
+    return events()
 
 
 def daily_mask(ev, dates, symbols):
-    """(n_days, n_sym) bool — t 일에 지수 구성종목이면 True. 변경일 **당일부터** 적용한다."""
-    sym_ix = {s: i for i, s in enumerate(symbols)}
-    m = np.zeros((len(dates), len(symbols)), bool)
-    keys = list(ev)
-    cur = np.zeros(len(symbols), bool)
-    k = 0
-    for t, d in enumerate(dates):
-        dd = d.date()
-        while k < len(keys) and keys[k] <= dd:
-            cur = np.zeros(len(symbols), bool)
-            for s in ev[keys[k]]:
-                s = RENAME.get(s, s)
-                if s in sym_ix:
-                    cur[sym_ix[s]] = True
-            k += 1
-        m[t] = cur
-    return m
-
-
-def fetch_missing():
-    """오늘의 패널에 없는 옛 구성종목을 yfinance 로 받는다. 실패는 결손으로 남긴다."""
-    import yfinance as yf
-    ev = membership()
-    have = set(pickle.load(open("data_cache/yf_ohlcv.pkl", "rb"))["close"].columns)
-    need = sorted({RENAME.get(s, s) for v in ev.values() for s in v} - have)
-    print(f"받아야 할 옛 구성종목 {len(need)}개")
-    raw = yf.download(need, start="2014-01-01", auto_adjust=True, progress=False, threads=True)
-    close = raw["Close"].dropna(how="all", axis=1)
-    PRICES.parent.mkdir(parents=True, exist_ok=True)
-    pickle.dump(close, PRICES.open("wb"))
-    print(f"받은 종목 {close.shape[1]}개 / 요청 {len(need)}개 → {PRICES}")
-    print("못 받은 종목:", sorted(set(need) - set(close.columns)))
+    return pit_mask(dates, symbols, quiet=True)
 
 
 # ---------- 패널 ----------

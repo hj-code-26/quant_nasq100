@@ -62,6 +62,16 @@ def features(refresh=False):
     # 변동성 조정 모멘텀
     f["mom_adj"] = f["mom"] / f["vol20"].replace(0, np.nan)
 
+    # ★ 당시 구성종목만 후보로 둔다 (2015~). 선택에 쓰는 지표에만 씌우고 close·ret1 은
+    #   그대로 둔다 — 이미 보유한 종목의 수익·청산은 지수에서 빠져도 계속돼야 한다.
+    #   PIT=0 이면 전부 True 라 옛 방식이 그대로 재현된다.
+    import pit
+    _m = pd.DataFrame(pit.mask(close.index, list(close.columns)),
+                      index=close.index, columns=close.columns)
+    for _k in f:
+        if _k not in ("close", "ret1"):
+            f[_k] = f[_k].where(_m)
+
     # 시장 국면 (backtest_volume.py 와 같은 정의)
     dv = (close * vol).sum(axis=1, min_count=1)
     vr = dv.rolling(20).mean() / dv.rolling(250).mean()

@@ -60,6 +60,12 @@ python research/corr_limits.py
 python research/pit_universe.py --fetch    # 옛 구성종목 시세 (yfinance, 1회. 이미 받았으면 생략)
 python research/pit_universe.py
 
+# 14) 기존 코드 vs PIT 반영 코드 — 같은 데이터·같은 규칙, 스위치 하나만 차이
+#     → pit_compare.csv  (불변식: 2015 이전 구간은 일별 수익률 완전 일치)
+python research/pit_compare.py
+PIT=0 python backtest.py --daily     # 옛 수치 재현 (편향 있는 유니버스)
+python backtest.py --daily           # PIT 반영이 기본값
+
 # 격리 검증만 다시 보기
 python -c "import sys;sys.path.insert(0,'.');from research.isolation import verify;print(verify())"
 
