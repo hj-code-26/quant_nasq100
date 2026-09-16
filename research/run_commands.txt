@@ -66,6 +66,14 @@ python research/pit_compare.py
 PIT=0 python backtest.py --daily     # 옛 수치 재현 (편향 있는 유니버스)
 python backtest.py --daily           # PIT 반영이 기본값
 
+# 15) G — 청산·국면·진입·보조지표 사전등록 그리드 (PIT 2015~, N=32+조합1)
+#     → g_ic_*.csv, g_cohort_*.csv, g_grid.csv, g_bench.csv, g_after_*.csv  결론: research/g_conclusion.md
+python research/exit_study.py
+#     사후 강건성 (+5 시도): 이웃·최소변경안·연도 하나 빼기·QQQ 대비 → g2_grid.csv, g2_loyo.csv, g2_vs_qqq.csv
+python research/exit_robust.py
+#     걷는 선택(과거 자료로만 고르기)·QQQ 혼합·QQQ 회귀 → g3_picks.csv, g3_select.csv, g3_blend.csv, g3_alpha.csv
+python research/wf_select.py
+
 # 격리 검증만 다시 보기
 python -c "import sys;sys.path.insert(0,'.');from research.isolation import verify;print(verify())"
 
@@ -80,3 +88,17 @@ python -c "import sys;sys.path.insert(0,'.');from research.isolation import veri
 # research/*.csv|md|txt 수작성 산출물 — audit_status.csv, data_gap.csv,
 #                       approval_requests.md, conclusion.md, run_commands.txt.
 #                       재생성되지 않으므로 out/ 을 지워도 남는다.
+
+# --- 라이브 무거래 진단 (2026-09-16) ---
+# 운영 DB 사본 + 실제 validate_orders 로 차단 단계 재현. 네트워크·LLM 호출 없음.
+python research/live_funnel.py
+#   → research/out/live_funnel.csv          run 별 퍼널 (판단/주문/제외/가용현금)
+#   → research/out/live_funnel_replay.json  현금 수준별 차단 재현
+#   보고서: research/live_diagnosis.md
+
+# 라이브 vs 백테스트 간극 (최소주문 비율 · 하락 국면 진입 차단)
+python research/live_gap.py
+#   → research/out/live_gap.csv   ΔSharpe + 짝유지 블록 부트스트랩 95% CI
+#   exit_study.sim 에 opt-in 2개 추가 (기본 꺼짐, check/check_prefix 통과 확인):
+#     cfg["bear_noentry"]  하락 국면 신규진입 차단 (현 2단계 프롬프트 근사)
+#     cfg["probe"]         진입 차단 일수 집계 dict

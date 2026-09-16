@@ -115,6 +115,13 @@ out, skip = run([sell("AAPL", 100)], {"AAPL": dec("AAPL", "sell", 20, 25, a)}, a
 assert out[0]["quantity"] == 0.1 and not skip                       # 전량 매도는 최소 금액 예외
 out, _ = run([sell("AAPL", 50)], {"AAPL": dec("AAPL", "sell", 20, 25, a)}, a, CLOSED)
 assert not out                                                      # 장외 부분 매도 → 정수 주 0
+# 장외 **전량** 매도도 정수 주만 — 토스는 소수점 수량을 정규장 시장가 매도로만 받는다 (WDAY 400 재현)
+a = acct(100, {"AAPL": hold(2.6, 20, 20)})
+out, _ = run([sell("AAPL", 100)], {"AAPL": dec("AAPL", "sell", 20, 25, a)}, a, CLOSED)
+assert out[0]["quantity"] == 2 and out[0]["whole"]                  # 2주 지금, 0.6주는 정규장에서
+a = acct(100, {"AAPL": hold(0.621832, 20, 20)})
+out, skip = run([sell("AAPL", 100)], {"AAPL": dec("AAPL", "sell", 20, 25, a)}, a, CLOSED)
+assert not out and "정규장" in skip[0]["skipped"]                    # 1주 미만 → 거절될 주문을 내지 않는다
 
 # --- 강제 청산: 손절 ---
 a = acct(100, {"AAPL": hold(10, 100, 80)})                          # -20%
@@ -319,6 +326,76 @@ assert _r and _r[0]["side"] == "sell", _o
 at.BEAR_CAP, at.BEAR_EXPOSURE_PCT = None, None           # 킬 스위치 — 기준선 동작으로 복귀
 assert at.exposure_cap() == _cap
 
+at.DB_PATH = _old_db
+
+
+# ---------- A안 D1~D4: 코드·프롬프트 계약과 관측성 ----------
+# D1. 하락 국면은 모멘텀으로 매수를 막지 않는다. 프롬프트(instructions.md 6-1)가 이 구간을
+#     모르면 LLM 이 "약 구간이면 hold" 로 저변동성 후보를 전부 거부한다 (2026-09-16 run 63).
+_f_bear, _t_bear = at.momentum_tier(3.7, "하락")
+assert _f_bear == 1.0 and "모멘텀 무관" in _t_bear
+assert at.momentum_tier(3.7, "보통")[0] == 0.4           # 평상시엔 약 구간 배수 0.4
+assert at.momentum_tier(-1.0, "보통")[0] == 0.0          # 음수는 매수 안 함
+assert at.momentum_tier(-1.0, "하락")[0] == 1.0          # 하락 국면은 음수여도 배수 유지
+_md = (at.ROOT / "instructions.md").read_text(encoding="utf-8")
+assert _t_bear in _md, "instructions.md 에 하락 국면 구간 이름이 없다 — LLM 이 약 구간으로 오인한다"
+assert "시장 국면" in _md and "6-1" in _md
+
+# D2. 1단계 페이로드 라벨이 screen() 의 실제 정렬 기준과 일치해야 한다.
+#     예전엔 하락 국면에도 "20일 수익률 내림차순" 이라 적어 LLM 에 거짓 입력을 줬다.
+_payloads = []
+_real_ask = at.ask_claude
+at.ask_claude = lambda f, payload, schema, **kw: (_payloads.append(payload)
+                                                  or {"candidates": []})
+_rows = [{"symbol": "EA", "ret_20d_pct": 2.0, "atr_pct": 0.2},
+         {"symbol": "NVDA", "ret_20d_pct": 30.0, "atr_pct": 5.0}]
+at.pick_candidates(_rows, acct(100), "하락")
+at.pick_candidates(_rows, acct(100), "보통")
+at.ask_claude = _real_ask
+_bear_p, _norm_p = _payloads
+assert _bear_p["시장 국면"] == "하락"
+assert any("atr_pct" in k for k in _bear_p), _bear_p.keys()
+assert not any("20일 수익률 내림차순" in k for k in _bear_p), "하락인데 모멘텀 정렬이라 라벨링"
+assert "atr_pct" in _bear_p["선정 규칙"]["표 정렬 기준"]
+assert any("20일 수익률 내림차순" in k for k in _norm_p), _norm_p.keys()
+# 프롬프트가 코드 판정을 쓰는가 — 자체 판정(표 중앙값)이 남아 있으면 두 판정이 엇갈린다
+_sc = (at.ROOT / "instructions_screen.md").read_text(encoding="utf-8")
+assert "중앙값이 −5% 미만" not in _sc and "시장 국면" in _sc
+
+# D3. 주문이 0건이어도 퍼널이 로그에 남아야 한다 (43사이클 무주문을 로그로 못 봤다).
+_seen = []
+_real_info, _real_warn = at.log.info, at.log.warning
+at.log.info = lambda m, *a, **kw: _seen.append(("info", m % a if a else m))
+at.log.warning = lambda m, *a, **kw: _seen.append(("warn", m % a if a else m))
+try:
+    _a = acct(0.01, {"MU": hold(1, 100, 100)})           # 현금 $0.01 → 가용 음수
+    _d = {"AAPL": dec("AAPL", "buy", 50, 25.0, _a)}
+    _o, _sk = run([buy("AAPL")], _d, _a)
+    at.log_funnel([1] * 101, [{"symbol": "AAPL"}], _d,
+                  {"orders": [buy("AAPL")], "summary": ""}, [], _o, _sk, _a)
+finally:
+    at.log.info, at.log.warning = _real_info, _real_warn
+assert _o == [], _o                                       # 가용현금 음수 → 주문 0건
+_txt = " ".join(m for _, m in _seen)
+assert "퍼널:" in _txt and "가용현금" in _txt, _txt
+assert any(k == "warn" and "매수 판단" in m for k, m in _seen), "전량 차단인데 경고가 없다"
+assert "차단 1건" in _txt, _txt
+
+# D4. 고아 run(status='running') 은 기동 때 interrupted 로 마감된다.
+import sqlite3 as _sq
+import tempfile as _tmp
+_tmpdb = pathlib.Path(_tmp.mkdtemp()) / "t.db"
+at.DB_PATH = _tmpdb
+at.initialize_db()
+at.db_insert("runs", {"timestamp": at._now(), "status": "running"})
+at.db_insert("runs", {"timestamp": at._now(), "status": "done"})
+at.initialize_db()                                        # 재기동
+with _sq.connect(_tmpdb) as _c:
+    _st = [r[0] for r in _c.execute("SELECT status FROM runs ORDER BY id")]
+assert _st == ["interrupted", "done"], _st
+at.initialize_db()
+with _sq.connect(_tmpdb) as _c:                           # 멱등 — 두 번 돌려도 done 은 그대로
+    assert [r[0] for r in _c.execute("SELECT status FROM runs ORDER BY id")] == _st
 at.DB_PATH = _old_db
 
 print("validate_orders OK")

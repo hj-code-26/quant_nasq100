@@ -11,6 +11,7 @@
        python autotrade.py --once     (1회만, 장 시간 무시)
 설정:  .env 참고. DRY_RUN=1 이면 주문 없이 전 과정을 기록만 한다.
 """
+import collections
 import concurrent.futures
 import datetime
 import json
@@ -166,6 +167,15 @@ def initialize_db():
                          ("cost_usd", "REAL")):
             if col not in rcols:
                 conn.execute(f"ALTER TABLE runs ADD COLUMN {col} {typ}")
+        # 고아 run 마감 — status='running' 인 채로 남은 것은 프로세스가 죽은 것이다
+        # (2026-09-16 재부팅으로 run 64 가 영구 running, 04·06·08시 사이클이 통째로 소실됐다).
+        # 이 프로세스가 유일한 실행자라는 가정 위에서만 맞다 — 여러 인스턴스를 동시에 돌리면
+        # 살아 있는 run 을 마감해 버린다. 그래서 상태만 바꾸고 주문은 건드리지 않는다.
+        orphans = [r[0] for r in conn.execute("SELECT id FROM runs WHERE status='running'")]
+        if orphans:
+            conn.execute("UPDATE runs SET status='interrupted' WHERE status='running'")
+            log.warning("이전 실행이 비정상 종료됨 — run %s 를 interrupted 로 마감한다. "
+                        "미체결 주문은 계좌 조회로 다시 확인된다", orphans)
 
 
 def log_equity(total_value, stock_value=None):
@@ -798,15 +808,26 @@ def screen(toss, universe=TICKERS, regime="보통"):
             for r in rows]
 
 
-def pick_candidates(rows, account):
-    """20일 모멘텀 상위 SCREEN_N 개 표를 주고 Claude 가 TOP_N 개를 고른다 (거부권 + 분산)."""
+def pick_candidates(rows, account, regime="보통"):
+    """상위 SCREEN_N 개 표를 주고 Claude 가 TOP_N 개를 고른다 (거부권 + 분산).
+
+    ★ 표의 정렬 기준은 국면마다 다르다(screen() — 평상시 20일 모멘텀 내림차순, 하락 국면
+      atr_pct 오름차순). 예전엔 국면과 무관하게 "20일 수익률 내림차순" 이라고 라벨을 붙여
+      **하락 국면에 LLM 에 거짓 입력**을 줬다. 국면 판정도 코드(QQQ 60일 < BEAR_RET60_PCT)
+      하나로 통일한다 — 프롬프트가 표 중앙값으로 따로 판정하면 두 판정이 엇갈린다.
+    """
     table = rows[:SCREEN_N]
+    bear = regime == "하락"
+    order = "atr_pct(일중 변동폭) 오름차순" if bear else "20일 수익률 내림차순"
+    signal = (f"저변동성 우선 (표는 {order}). 하락 국면이므로 20일 수익률 순위는 무시한다"
+              if bear else f"20일 수익률 상위 (표는 {order}). 상위권을 이유 없이 빼지 말 것")
     out = ask_claude("instructions_screen.md", {
         "기준 시각 (KST)": _now(),
+        "시장 국면": regime,
         "선정 규칙": {"최대 후보 수": TOP_N, "보유 기간": "약 20 거래일",
-                  "검증된 신호": "20일 수익률 상위 (표는 그 순서). 상위권을 이유 없이 빼지 말 것"},
+                  "표 정렬 기준": order, "검증된 신호": signal},
         "현재 보유 종목": sorted(account["holdings"]),
-        "유니버스 (20일 수익률 내림차순)": table,
+        f"유니버스 ({order})": table,
     }, CANDIDATES_SCHEMA)
     valid = {r["symbol"] for r in table}
     picks = []
@@ -1042,13 +1063,18 @@ def validate_orders(plan, decisions, account, session, entries=None, skip_symbol
             skip(o, "sell_pct 없음"); continue
         qty = h["quantity"] * pct / 100
         if not frac:
-            qty = float(int(qty)) if pct < 100 else h["quantity"]   # 정규장 외엔 정수 주만
+            # 토스는 소수점 수량을 **정규장 시장가 매도**로만 받는다. 장외 지정가에 소수점을 실으면
+            # 주문 전체가 400 으로 거절된다 (2026-09-08 WDAY 0.62주 3회 연속). 전량 매도도 예외가 아니다.
+            # 지금은 정수 주만 팔고, 소수점 잔량은 다음 정규장 사이클이 판다.
+            qty = float(int(qty + 1e-9))
+            if qty < 1:
+                skip(o, "소수점 잔량은 정규장(마감 1시간 전까지) 시장가로만 매도 가능 — 다음 정규장 사이클"); continue
         if qty <= 0 or (pct < 100 and qty * h["last_price"] < MIN_ORDER_USD):
             skip(o, "최소 주문 금액 미만 (전량 매도는 예외)"); continue
         limit = round(h["last_price"] * (1 - PREMARKET_SLIP / 100), 2) if pre else None
         out.append({"symbol": sym, "side": "sell", "quantity": round(qty, 6),
                     "price": h["last_price"], "limit_price": limit,
-                    "amount_usd": round(qty * h["last_price"], 2),
+                    "amount_usd": round(qty * h["last_price"], 2), "whole": not frac,
                     "cancel_first": cancel_first, "reason": o["reason"]})
         done.add(sym)
         # ★ 슬롯은 여기서 비우지 않는다. 매도는 '제출'했을 뿐 체결이 아니고, 현금·슬롯은
@@ -1165,6 +1191,8 @@ def place_order(toss, o, coid=None):
     if o.get("cancel_first"):
         q = free_position(toss, o["symbol"])
         if q is not None:
+            if o.get("whole"):              # 장외: 재조회 수량도 정수 주로 (소수점은 거절된다)
+                q = float(int(q + 1e-9))
             if q <= 0:
                 raise TossError(409, "no-sellable", f"{o['symbol']}: 매도 가능 수량 0")
             o = {**o, "quantity": min(o["quantity"], q)}
@@ -1211,6 +1239,31 @@ def place_all(toss, run_id, orders, dry, tag=""):
         with sqlite3.connect(DB_PATH) as conn:
             conn.execute("UPDATE orders SET " + ", ".join(f"{k}=?" for k in fields) +
                          " WHERE id=?", [*fields.values(), row_id])
+
+
+def log_funnel(rows, picks, decisions, plan, risk_orders, orders, skipped, account):
+    """의사결정 퍼널 한 줄 + 차단 사유 집계. **주문이 0건이어도 반드시 남긴다.**
+
+    이게 없어서 2026-09-09~16 의 43사이클 무주문을 사후 DB 파싱으로만 알아냈다.
+    특히 '매수 판단은 났는데 배분 단계가 주문으로 안 올렸다' 는 경우는 어디에도 흔적이 없었다.
+    """
+    d = collections.Counter(v["decision"] for v in decisions.values())
+    plan_buy = sum(1 for o in plan["orders"] if o.get("side") == "buy")
+    plan_sell = sum(1 for o in plan["orders"] if o.get("side") == "sell")
+    cash_left = account["cash"] - account["total_value"] * CASH_RESERVE_PCT / 100
+    log.info("퍼널: 스크리닝 %d → 후보 %d → 판단 %d(매수%d·매도%d·보유%d) → 배분 %d(매수%d·매도%d) "
+             "→ 주문 %d(위험관리 %d) · 제외 %d | 가용현금 $%.2f (현금 $%.2f − 유지선 $%.2f)",
+             len(rows), len(picks), len(decisions), d["buy"], d["sell"], d["hold"],
+             len(plan["orders"]), plan_buy, plan_sell, len(orders) + len(risk_orders),
+             len(risk_orders), len(skipped), cash_left, account["cash"],
+             account["total_value"] * CASH_RESERVE_PCT / 100)
+    if d["buy"] and not any(o["side"] == "buy" for o in orders):
+        log.warning("매수 판단 %d건이 전부 주문이 되지 못했다 — 사유: %s", d["buy"],
+                    dict(collections.Counter(o["skipped"] for o in skipped
+                                             if o.get("side") == "buy")) or "배분이 안 올림")
+    if skipped:
+        for why, n in collections.Counter(o["skipped"] for o in skipped).most_common():
+            log.info("  차단 %d건: %s", n, why)
 
 
 def log_skipped(run_id, skipped):
@@ -1298,7 +1351,7 @@ def run_cycle(dry_run=None, force=False):
         else:
             log.info("스크리닝 %d종목, 20일 수익률 상위: %s", len(rows),
                      [(r["symbol"], r["ret_20d_pct"]) for r in rows[:8]])
-        picks = pick_candidates(rows, account)
+        picks = pick_candidates(rows, account, regime)
         reasons = {p["symbol"]: p["reason"] for p in picks}
         log.info("후보: %s", list(reasons))
         db_update_run(run_id, candidates=json.dumps(picks, ensure_ascii=False))
@@ -1327,6 +1380,7 @@ def run_cycle(dry_run=None, force=False):
             plan["orders"] = [o for o in plan["orders"] if o.get("side") != "buy"]
         orders, skipped = validate_orders(plan, decisions, account, session, entries,
                                           skip_symbols=risk_symbols)
+        log_funnel(rows, picks, decisions, plan, risk_orders, orders, skipped, account)
         place_all(toss, run_id, orders, dry)
         log_skipped(run_id, skipped)
         db_update_run(run_id, status="done", summary=plan["summary"])

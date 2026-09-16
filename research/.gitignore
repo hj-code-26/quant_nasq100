@@ -13,3 +13,6 @@ out/research_autotrade.log
 # 운영 판단 기록(trading_decisions.db)을 백필한 DB. 원본이 git 밖에 있으므로
 # 파생물도 커밋하지 않는다. 재생성: python research/shadow.py
 out/shadow.db
+
+# 운영 DB 사본 (live_funnel.py 가 매 실행 새로 뜬다). 원본이 git 밖이므로 파생물도 커밋 금지
+out/live_snapshot.db
