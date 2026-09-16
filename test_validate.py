@@ -28,8 +28,18 @@ def hold(qty, avg, last):
 
 
 def acct(cash, holdings=None, open_orders=()):
+    """open_orders 는 종목 목록(=미체결 매수 1건씩) 또는 {종목: [주문상세]}.
+
+    account_state 가 상세(방향·미체결 잔량)를 같이 주므로 테스트도 같은 모양을 쓴다 —
+    '미체결이 있다' 만으로는 기존 매도와 목표를 대사할 수 없기 때문이다.
+    """
     h = holdings or {}
-    return {"cash": cash, "holdings": h, "open_orders": list(open_orders),
+    by = (dict(open_orders) if isinstance(open_orders, dict) else
+          {s: [{"orderId": "o-" + s, "side": "BUY", "quantity": 1.0, "filled": 0.0,
+                "remaining": 1.0, "price": None, "state": "ACKNOWLEDGED"}]
+           for s in open_orders})
+    return {"cash": cash, "holdings": h, "open_orders": sorted(by),
+            "open_by_symbol": by, "open_unknown": False,
             "total_value": cash + sum(x["market_value"] for x in h.values())}
 
 
