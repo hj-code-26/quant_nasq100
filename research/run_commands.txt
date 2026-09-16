@@ -102,3 +102,10 @@ python research/live_gap.py
 #   exit_study.sim 에 opt-in 2개 추가 (기본 꺼짐, check/check_prefix 통과 확인):
 #     cfg["bear_noentry"]  하락 국면 신규진입 차단 (현 2단계 프롬프트 근사)
 #     cfg["probe"]         진입 차단 일수 집계 dict
+
+# 조건부 만기 청산 후보 (시간만이 조건인 문제)
+python research/exit_condition.py
+#   → research/out/exit_condition.csv           운영 형태 vs 백테스트 형태 + 이웃
+#   → research/out/exit_condition_scorecard.csv 사전등록 채택 기준 전체 (누적 시도 N=50)
+#   보고서: research/exit_condition.md
+#   exit_study.sim opt-in 추가: cfg["extend_daily"] — 연장 시 보유 시계를 리셋하지 않는다(운영 형태)

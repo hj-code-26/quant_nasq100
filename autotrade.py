@@ -80,6 +80,10 @@ WORKERS = int(os.environ.get("WORKERS", 3))               # 종목별 판단 병
 MAX_HOLD_DAYS = int(os.environ.get("MAX_HOLD_DAYS", 20))  # 만기 청산 (거래일). 0 이면 끔
 BEAR_INDEX = os.environ.get("BEAR_INDEX", "QQQ")          # 국면 판정용 지수 ETF. 빈 값이면 유니버스 중앙값 사용
 BEAR_RET60_PCT = float(os.environ.get("BEAR_RET60_PCT", -3))   # 60일 수익률이 이 밑이면 하락 국면
+# 만기 청산을 '시간이 됐으니 판다' 에서 '시간이 됐으니 다시 본다' 로 바꾼다.
+# 만기 도달 종목이 오늘 선별 상위 N위 안이면 팔지 않고 다음 사이클에 또 본다. 0 이면 끔(현행).
+# 근거·한계는 research/exit_condition.md. 사전등록 채택 기준(DSR≥0.95)은 **통과하지 못했다.**
+HOLD_EXTEND_TOP = int(os.environ.get("HOLD_EXTEND_TOP", 0))
 # 변동성 타겟: 계좌 일별 수익률의 실현 변동성이 목표를 넘으면 주식 노출을 줄인다 (0 이면 끔).
 # 신규 매수만 조이는 방식은 슬롯이 늘 차 있어 아무 효과가 없었다 — 보유분을 줄여야 작동한다.
 VOL_TARGET_PCT = float(os.environ.get("VOL_TARGET_PCT", 30))
@@ -808,6 +812,35 @@ def screen(toss, universe=TICKERS, regime="보통"):
             for r in rows]
 
 
+def hold_rule():
+    """만기 규칙을 사람이 읽는 한 문장으로. 프롬프트가 옛 숫자를 인용하지 않게 한 곳에서 만든다."""
+    if MAX_HOLD_DAYS <= 0:
+        return "코드의 만기 청산 없음 (MAX_HOLD_DAYS=0)"
+    base = f"보유 {MAX_HOLD_DAYS}거래일이 지나면 코드가 자동 매도한다"
+    if HOLD_EXTEND_TOP <= 0:
+        return base + " (Claude 판단과 무관)"
+    return (base + f", 단 그 시점에 선별 상위 {HOLD_EXTEND_TOP}위 안이면 팔지 않고 다음 사이클에 "
+                   "다시 판정한다. 즉 보유 기간은 고정이 아니라 '순위에서 밀리는 날까지' 다 "
+                   "(Claude 판단과 무관하게 코드가 처리한다)")
+
+
+def extendable(rows, holdings, regime="보통"):
+    """만기 연장 자격 — 오늘 선별 상위 HOLD_EXTEND_TOP 위 안에 있는 보유 종목.
+
+    `rows` 는 screen() 이 국면에 맞춰 정렬한 표다(평상시 20일 모멘텀 내림차순, 하락 국면
+    atr_pct 오름차순). 즉 **같은 기준으로 지금 새로 사겠는가**를 묻는 것이고, 국면이 바뀌면
+    질문도 같이 바뀐다. 가격이 떨어졌다는 이유로 파는 규칙(손절·모멘텀 음전·50일선 이탈)은
+    PIT 에서 전부 무효였다 — 판 종목이 이후 20일에 59~63% 올랐다(research/g_conclusion.md ①).
+
+    평상시에는 진입과 같은 조건(20일 수익률 > 0)을 함께 건다. 하락 국면은 저변동성으로 고르므로
+    모멘텀 부호를 보지 않는다 (momentum_tier 와 같은 규칙).
+    """
+    if HOLD_EXTEND_TOP <= 0 or not rows:
+        return set()
+    top = [r for r in rows if regime == "하락" or (r.get("ret_20d_pct") or 0) > 0]
+    return {r["symbol"] for r in top[:HOLD_EXTEND_TOP]} & set(holdings)
+
+
 def pick_candidates(rows, account, regime="보통"):
     """상위 SCREEN_N 개 표를 주고 Claude 가 TOP_N 개를 고른다 (거부권 + 분산).
 
@@ -824,7 +857,7 @@ def pick_candidates(rows, account, regime="보통"):
     out = ask_claude("instructions_screen.md", {
         "기준 시각 (KST)": _now(),
         "시장 국면": regime,
-        "선정 규칙": {"최대 후보 수": TOP_N, "보유 기간": "약 20 거래일",
+        "선정 규칙": {"최대 후보 수": TOP_N, "보유 기간": hold_rule(),
                   "표 정렬 기준": order, "검증된 신호": signal},
         "현재 보유 종목": sorted(account["holdings"]),
         f"유니버스 ({order})": table,
@@ -919,7 +952,7 @@ def allocate(decisions, account, session, regime="보통", entries=None):
     payload = {
         "기준 시각 (KST)": _now(),
         "시장 국면": regime,
-        "만기 청산": f"보유 {MAX_HOLD_DAYS}거래일이 지난 종목은 코드가 자동 매도한다 (0이면 끔)",
+        "만기 청산": hold_rule(),
         "보유 거래일수": {s: trading_days_since((entries or {}).get(s))
                      for s in account["holdings"]},
         "장 시간 (KST, 거래시작·정규개장·정규마감·거래종료)":
@@ -971,7 +1004,8 @@ def forced_exits(decisions, account):
     return out
 
 
-def validate_orders(plan, decisions, account, session, entries=None, skip_symbols=()):
+def validate_orders(plan, decisions, account, session, entries=None, skip_symbols=(),
+                    extend_ok=()):
     """Claude 의 주문 목록을 규칙으로 걸러 실제 낼 주문만 남긴다. 매도 먼저, 매수 나중.
 
     plan 을 비우고 decisions={} 로 부르면 **LLM 없이도** 손절·만기·노출 축소만 뽑아낼 수
@@ -1037,9 +1071,20 @@ def validate_orders(plan, decisions, account, session, entries=None, skip_symbol
                 continue
             held = trading_days_since((entries or {}).get(sym))
             if held is not None and held >= MAX_HOLD_DAYS:
+                if sym in extend_ok:
+                    # ★ 보유 시계는 리셋하지 않는다 — 진입 시각은 브로커 체결 이력에서 읽는
+                    #   값이라 바꿀 수단이 없다. 그래서 만기 이후 **매 사이클** 다시 묻고,
+                    #   상위권에서 빠지는 첫 사이클에 판다. 백테스트의 '연장 후 H일 뒤 재확인'
+                    #   형태와 성적 차이는 구분되지 않았다 (ΔSh -0.096, CI -0.403~+0.197).
+                    log.info("만기 연장 %s: 보유 %d거래일이지만 선별 상위 %d위 안 — 매도하지 않는다",
+                             sym, held, HOLD_EXTEND_TOP)
+                    continue
                 sells.append({"symbol": sym, "side": "sell", "sell_pct": 100, "forced": True,
-                              "reason": f"보유 {held}거래일로 만기({MAX_HOLD_DAYS}) 도달 — 코드 강제 청산"})
-                log.info("만기 청산 %s: 보유 %d거래일", sym, held)
+                              "reason": f"보유 {held}거래일로 만기({MAX_HOLD_DAYS}) 도달"
+                                        + (f" · 선별 상위 {HOLD_EXTEND_TOP}위 밖" if HOLD_EXTEND_TOP
+                                           else "") + " — 코드 강제 청산"})
+                log.info("만기 청산 %s: 보유 %d거래일%s", sym, held,
+                         f" · 상위 {HOLD_EXTEND_TOP}위 밖" if HOLD_EXTEND_TOP else "")
     done = set()
     for o in sells:
         sym = str(o["symbol"]).upper()
@@ -1324,10 +1369,28 @@ def run_cycle(dry_run=None, force=False):
         log.info("보유 거래일수: %s", {s: trading_days_since(entries.get(s))
                                  for s in account["holdings"]})
 
-        # 0-1) ★ 위험 관리 먼저. 손절·만기·노출 축소는 LLM 스크리닝이 실패하거나
-        #      느려도 반드시 나가야 한다 — 그래서 진입 분석보다 앞에서, LLM 없이 돌린다.
+        reg = market_regime(toss, df=idx)
+        regime = reg["regime"]
+        log.info("국면: %s (%s 60일 %s%%, 기준 %s%%)", regime, reg["source"],
+                 reg["ret_60d_pct"], BEAR_RET60_PCT)
+
+        # 1) 스크리닝 — 만기 연장 판정에 오늘의 순위가 필요해서 위험관리 패스보다 앞에 둔다.
+        #    LLM 이 아니라 일봉 조회라 15~20초다. 실패하면 연장 없이(=현행 동작) 진행한다.
+        t_snapshot = time.time()
+        rows = []
+        try:
+            rows = screen(toss, regime=regime)
+        except Exception as e:  # noqa: BLE001
+            log.error("스크리닝 실패: %s — 만기 연장 없이 위험관리만 진행한다", e)
+        extend_ok = extendable(rows, account["holdings"], regime)
+        if HOLD_EXTEND_TOP and extend_ok:
+            log.info("만기 연장 후보(선별 상위 %d위 안 보유): %s", HOLD_EXTEND_TOP, sorted(extend_ok))
+
+        # 0-1) ★ 위험 관리 먼저. 손절·만기·노출 축소는 LLM 판단이 실패하거나
+        #      느려도 반드시 나가야 한다 — 그래서 LLM 호출 전에, LLM 없이 돌린다.
         risk_orders, risk_skipped = validate_orders(
-            {"orders": [], "summary": ""}, {}, account, session, entries)
+            {"orders": [], "summary": ""}, {}, account, session, entries,
+            extend_ok=extend_ok)
         risk_symbols = {o["symbol"] for o in risk_orders}
         if risk_orders:
             log.warning("위험관리 주문 %d건 선제 실행: %s", len(risk_orders),
@@ -1336,14 +1399,8 @@ def run_cycle(dry_run=None, force=False):
             log_skipped(run_id, risk_skipped)
             account = account_state(toss)      # 슬롯·현금은 체결로만 생긴다 — 다시 읽는다
 
-        reg = market_regime(toss, df=idx)
-        regime = reg["regime"]
-        log.info("국면: %s (%s 60일 %s%%, 기준 %s%%)", regime, reg["source"],
-                 reg["ret_60d_pct"], BEAR_RET60_PCT)
-
-        # 1) 스크리닝
-        t_snapshot = time.time()
-        rows = screen(toss, regime=regime)
+        if not rows:
+            raise RuntimeError("스크리닝 결과가 없음 — 진입 분석을 건너뛴다")
         if regime == "하락":
             reg = market_regime(toss, rows) if reg["ret_60d_pct"] is None else reg
             log.info("스크리닝 %d종목, 저변동성(atr_pct) 하위: %s", len(rows),
@@ -1379,7 +1436,7 @@ def run_cycle(dry_run=None, force=False):
                       stale, STALE_MAX_MIN)
             plan["orders"] = [o for o in plan["orders"] if o.get("side") != "buy"]
         orders, skipped = validate_orders(plan, decisions, account, session, entries,
-                                          skip_symbols=risk_symbols)
+                                          skip_symbols=risk_symbols, extend_ok=extend_ok)
         log_funnel(rows, picks, decisions, plan, risk_orders, orders, skipped, account)
         place_all(toss, run_id, orders, dry)
         log_skipped(run_id, skipped)

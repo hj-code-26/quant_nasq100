@@ -153,6 +153,11 @@ def sim(P, cfg):
     #   probe: dict 를 주면 진입 차단 일수를 센다 (현금유지·최소주문에 막힌 날).
     bear_noentry = cfg.get("bear_noentry", False)
     probe = cfg.get("probe")
+    #   extend_daily: 만기 연장 시 보유 시계를 **리셋하지 않는다**. X14 는 연장하면 H일을
+    #     더 주고 그때 다시 보지만, 운영은 진입 시각을 브로커 체결 이력에서 읽으므로
+    #     리셋할 수단이 없다 — 만기 이후 **매 사이클** 재확인하고 순위에서 빠지는 날 판다.
+    #     운영에 옮길 수 있는 형태가 어느 쪽인지 재려고 둘을 분리했다.
+    extend_daily = cfg.get("extend_daily", False)
     feeq = fee if park else 0.0                     # 대기 현금을 QQQ 로 둘 때 드나드는 비용
 
     pos = np.zeros(m)
@@ -211,8 +216,9 @@ def sim(P, cfg):
                         ok &= F["mom20"][u] > 0
                     if ok.sum() >= extend:
                         keep = exp & ok & (score >= np.partition(score[ok], -extend)[-extend])
-                        day[keep] = t
-                        exp &= ~keep
+                        if not extend_daily:
+                            day[keep] = t          # 시계 리셋 → H일 뒤에 다시 본다
+                        exp &= ~keep               # extend_daily 면 내일 또 만기라 매일 재확인
                 exits += [(t, c, "만기") for c in np.flatnonzero(exp)]
                 gone |= exp
             for why, f in fl:

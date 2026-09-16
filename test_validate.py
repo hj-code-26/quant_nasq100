@@ -398,4 +398,49 @@ with _sq.connect(_tmpdb) as _c:                           # 멱등 — 두 번 �
     assert [r[0] for r in _c.execute("SELECT status FROM runs ORDER BY id")] == _st
 at.DB_PATH = _old_db
 
+# ---------- 조건부 만기: HOLD_EXTEND_TOP ----------
+# "시간이 됐으니 판다" → "시간이 됐으니 같은 기준으로 다시 묻는다".
+# 근거 research/exit_condition.md — 사전등록 DSR 기준은 통과하지 못했다(기본 꺼짐).
+_old_extend = at.HOLD_EXTEND_TOP
+_ENTRY = (datetime.datetime.now(at.NY) - datetime.timedelta(days=120)).isoformat()
+_a = acct(0, {"AAPL": hold(1, 100, 100), "TSLA": hold(1, 100, 100)})
+_e = {"AAPL": _ENTRY, "TSLA": _ENTRY}                      # 둘 다 만기 초과
+_rows = [{"symbol": "AAPL", "ret_20d_pct": 25.0, "atr_pct": 3.0},
+         {"symbol": "ZZZZ", "ret_20d_pct": 20.0, "atr_pct": 0.5},
+         {"symbol": "TSLA", "ret_20d_pct": 1.0, "atr_pct": 9.0}]
+
+at.HOLD_EXTEND_TOP = 0                                     # 꺼짐 = 현행 — 시간만으로 전량 매도
+assert at.extendable(_rows, _a["holdings"], "보통") == set()
+_o, _ = at.validate_orders({"orders": [], "summary": ""}, {}, _a, REGULAR, _e)
+assert sorted(o["symbol"] for o in _o) == ["AAPL", "TSLA"], _o
+assert all("만기" in o["reason"] for o in _o)
+
+at.HOLD_EXTEND_TOP = 2                                     # 켜짐 — 상위 2위 안이면 유지
+assert at.extendable(_rows, _a["holdings"], "보통") == {"AAPL"}   # ZZZZ 는 미보유
+_o, _ = at.validate_orders({"orders": [], "summary": ""}, {}, _a, REGULAR, _e,
+                           extend_ok=at.extendable(_rows, _a["holdings"], "보통"))
+assert [o["symbol"] for o in _o] == ["TSLA"], _o            # 순위 밖만 판다
+assert "상위 2위 밖" in _o[0]["reason"], _o[0]["reason"]
+
+# 평상시엔 진입과 같은 조건(20일 수익률 > 0)을 함께 건다 — 음수면 연장 자격 없음
+_neg = [{"symbol": "AAPL", "ret_20d_pct": -5.0, "atr_pct": 3.0}]
+assert at.extendable(_neg, _a["holdings"], "보통") == set()
+# 하락 국면은 저변동성으로 고르므로 모멘텀 부호를 보지 않는다 (momentum_tier 와 같은 규칙)
+assert at.extendable(_neg, _a["holdings"], "하락") == {"AAPL"}
+
+# 연장은 손절·노출축소를 막지 못한다 — 위험 축소가 만기 연장보다 우선이다
+at.STOP_LOSS_PCT = 15
+_a2 = acct(0, {"AAPL": hold(1, 100, 80)})                  # -20% → 손절 대상
+_o, _ = at.validate_orders({"orders": [], "summary": ""}, {}, _a2, REGULAR,
+                           {"AAPL": _ENTRY}, extend_ok={"AAPL"})
+assert [o["symbol"] for o in _o] == ["AAPL"] and "손절" in _o[0]["reason"], _o
+
+# 프롬프트에 나가는 만기 문구가 실제 설정을 따라간다 (옛 "20 거래일" 고정 문구 제거)
+assert "상위 2위" in at.hold_rule() and "고정이 아니라" in at.hold_rule()
+at.HOLD_EXTEND_TOP = 0
+assert "상위" not in at.hold_rule() and str(at.MAX_HOLD_DAYS) in at.hold_rule()
+at.MAX_HOLD_DAYS = 0
+assert "없음" in at.hold_rule()
+at.MAX_HOLD_DAYS, at.HOLD_EXTEND_TOP = 20, _old_extend
+
 print("validate_orders OK")
