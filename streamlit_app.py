@@ -198,8 +198,19 @@ st.dataframe(runs.drop(columns=["id"]).rename(columns={
     width="stretch", hide_index=True)
 
 st.subheader("주문")
-st.dataframe(q("SELECT timestamp, run_id, symbol, side, quantity, amount_usd, price, status, reason "
-               "FROM orders ORDER BY id DESC LIMIT 300"), width="stretch", hide_index=True)
+# ★ 여기 status 는 **브로커 접수 여부**다. 체결이 아니다. 실행 기록의 '완료' 도 사이클이
+#   끝났다는 뜻이지 매도가 됐다는 뜻이 아니다 — 둘을 섞어 읽으면 팔린 줄 알고 넘어간다.
+st.caption("상태: INTENT_RECORDED(의도 기록) · ACKNOWLEDGED(**접수**, 체결 아님) · "
+           "PARTIALLY_FILLED / FILLED(체결) · CANCELED · REJECTED(거절) · "
+           "DEFERRED(상태 불명이라 보류) · UNKNOWN(제출 결과 미확인 — 계좌에서 확인 필요) · "
+           "skipped(사유 코드). 체결 여부는 토스 앱/계좌 조회로 확인하세요.")
+_orders = q("SELECT timestamp, run_id, symbol, side, quantity, amount_usd, price, status, "
+            "order_id, reason FROM orders ORDER BY id DESC LIMIT 300")
+_attn = _orders[_orders["status"].astype(str).str.startswith(("UNKNOWN", "DEFERRED"))]
+if len(_attn):
+    st.warning(f"확인이 필요한 주문 {len(_attn)}건 — 접수 여부·매도 가능 수량을 확인하지 못해 "
+               "보류되었거나 결과가 불명입니다. 계좌에서 대사한 뒤 다음 사이클을 기다리세요.")
+st.dataframe(_orders, width="stretch", hide_index=True)
 
 st.subheader("종목별 판단")
 st.dataframe(q("SELECT timestamp, run_id, symbol, decision, percentage, reason, stock_balance, "

@@ -74,6 +74,13 @@ class FakeToss:
         self.created = []
         self.cancelled = []
 
+    def us_market_calendar(self, date=None):
+        # place_all 이 **제출 직전** 세션을 다시 확인한다 — 대역도 거래 가능 구간을 준다.
+        n = datetime.datetime.now(at.NY)
+        return {"today": {"regularMarket": {
+            "startTime": (n - datetime.timedelta(hours=1)).isoformat(),
+            "endTime": (n + datetime.timedelta(hours=3)).isoformat()}}}
+
     def orders(self, status="OPEN", symbol=None):
         rows = self._open if status == "OPEN" else self._closed
         if symbol:
@@ -271,22 +278,34 @@ def t_cancel_race_partial_fill():
 
 
 def t_sellable_zero_refuses():
-    """매도 가능 수량 0 이면 주문을 내지 않고 명시적으로 실패한다."""
+    """매도 가능 수량 0 이면 주문을 내지 않고 명시적으로 **보류**한다 (실패가 아니라 '모름'이 아닌 '없음')."""
     t = FakeToss(open_orders=[], sellable=0.0)
     try:
         at.place_order(t, {"symbol": "AAA", "side": "sell", "quantity": 5.0,
                            "amount_usd": 50, "price": 10, "cancel_first": True,
                            "reason": "만기"}, coid="X")
-    except at.TossError as e:
-        assert e.status == 409 and e.code == "no-sellable", e
+    except at.Deferred as e:
+        assert "NO_SELLABLE" in str(e), e
         return
     raise AssertionError("매도 가능 0 인데 주문이 나갔다")
 
 
-def t_sellable_lookup_fails_uses_plan():
-    """조회 자체가 실패하면 None → 계획 수량 그대로 (조용히 0 으로 만들지 않는다)."""
+def t_sellable_lookup_fails_defers():
+    """조회 자체가 실패하면 UNKNOWN → **오래된 계획 수량으로 제출하지 않는다.**
+
+    (예전에는 None 을 '계획 수량 그대로' 로 읽었다. 그러면 취소가 끝났는지도 모르는 채
+     기존 주문과 합쳐 초과 매도가 나갈 수 있었다.)
+    """
     t = FakeToss(open_orders=[], sellable=None)
     assert at.free_position(t, "AAA", timeout=0) is None
+    try:
+        at.place_order(t, {"symbol": "AAA", "side": "sell", "quantity": 5.0,
+                           "amount_usd": 50, "price": 10, "cancel_first": True,
+                           "reason": "손절"}, coid="X")
+    except at.Deferred:
+        assert not t.created, t.created
+        return
+    raise AssertionError("수량 UNKNOWN 인데 계획 수량으로 제출했다")
 
 
 def t_late_fill_after_timeout():
@@ -323,7 +342,7 @@ def t_durable_intent_before_submit():
         pass
     with sqlite3.connect(db) as c:
         rows = c.execute("SELECT status, order_id FROM orders").fetchall()
-    assert rows and rows[0][0] == "pending", rows
+    assert rows and rows[0][0] == "INTENT_RECORDED", rows
 
 
 def t_duplicate_process_same_coid():
@@ -413,7 +432,7 @@ TESTS = [
     ("DST 경계 거래일 계산", t_dst_boundary),
     ("취소 경합 + 부분체결 clamp", t_cancel_race_partial_fill),
     ("매도가능 0 → 주문 거절", t_sellable_zero_refuses),
-    ("매도가능 조회 실패 → 계획 수량", t_sellable_lookup_fails_uses_plan),
+    ("매도가능 조회 실패 → 제출 보류", t_sellable_lookup_fails_defers),
     ("타임아웃 후 뒤늦은 접수 대사", t_late_fill_after_timeout),
     ("durable intent (재시작 대비)", t_durable_intent_before_submit),
     ("중복 프로세스 동일 clientOrderId", t_duplicate_process_same_coid),

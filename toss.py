@@ -125,7 +125,15 @@ class TossClient:
                 err = r.json().get("error", {})
                 raise TossError(r.status_code, err.get("code"), err.get("message"), err.get("data"))
             except (requests.ConnectionError, requests.Timeout, ValueError) as e:
-                last = e          # 끊긴 응답·잘린 JSON 은 잠깐 쉬고 재시도
+                # ★ 읽기와 상태 변경의 재시도 정책을 나눈다. 주문 생성·취소·정정은 서버에
+                #   도달했는지 알 수 없는 상태로 끝날 수 있어서, 그대로 재전송하면 중복
+                #   주문이 된다. clientOrderId 의 멱등성 보장 범위·보존 기간이 문서로
+                #   확인되기 전까지는 "같은 키니까 안전" 이라고 단정하지 않는다.
+                #   → 호출자(place_all)가 find_order 로 대사한 뒤 결정한다.
+                if method != "GET":
+                    raise TossError(503, "unknown-result",
+                                    f"상태 변경 요청의 결과 불명 ({method} {path}): {e}")
+                last = e          # 끊긴 응답·잘린 JSON 은 잠깐 쉬고 재시도 (읽기 전용)
                 time.sleep(1.0 * (attempt + 1))
         raise TossError(503, "retry-exhausted", f"재시도 초과: {last}")
 

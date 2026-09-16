@@ -161,8 +161,8 @@ def t_mutant_slot_reuse_breaks_max_positions():
 def t_mutant_partial_fill_ignored():
     """부분체결 clamp 제거 → 매도가능 수량보다 많이 파는 주문이 나간다."""
     mut = mutate_autotrade([(
-        '            o = {**o, "quantity": min(o["quantity"], q)}',
-        "            pass")])
+        '        o = {**o, "quantity": min(o["quantity"], q)}',
+        "        pass")])
     from research.test_safety import FakeToss
 
     def run():
