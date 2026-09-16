@@ -81,11 +81,35 @@ class FakeToss:
             "startTime": (n - datetime.timedelta(hours=1)).isoformat(),
             "endTime": (n + datetime.timedelta(hours=3)).isoformat()}}}
 
-    def orders(self, status="OPEN", symbol=None):
+    def orders(self, status="OPEN", symbol=None, limit=None, cursor=None,
+               from_date=None, to_date=None):
+        """공식 스펙(1.2.17): OPEN 은 전량, CLOSED 는 limit(기본 20·최대 100)+cursor."""
         rows = self._open if status == "OPEN" else self._closed
         if symbol:
             rows = [r for r in rows if r.get("symbol") == symbol]
-        return {"orders": rows}
+        if status == "OPEN":
+            return {"orders": rows, "nextCursor": None, "hasNext": False}
+        n, i = min(int(limit or 20), 100), int(cursor or 0)
+        has = i + n < len(rows)
+        return {"orders": rows[i:i + n], "nextCursor": str(i + n) if has else None,
+                "hasNext": has}
+
+    def orders_all(self, status="OPEN", symbol=None, from_date=None, to_date=None,
+                   max_pages=20):
+        rows, cursor = [], None
+        for _ in range(max_pages):
+            r = self.orders(status, symbol=symbol, limit=100, cursor=cursor)
+            rows.extend(r["orders"])
+            cursor = r["nextCursor"]
+            if not r["hasNext"]:
+                return rows, True
+        return rows, False
+
+    def order(self, order_id):
+        for r in self._open + self._closed:
+            if r.get("orderId") == order_id:
+                return r
+        raise at.TossError(404, "not-found", "없는 주문")
 
     def cancel_order(self, oid):
         self.cancelled.append(oid)

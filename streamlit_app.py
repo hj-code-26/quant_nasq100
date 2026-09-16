@@ -200,12 +200,14 @@ st.dataframe(runs.drop(columns=["id"]).rename(columns={
 st.subheader("주문")
 # ★ 여기 status 는 **브로커 접수 여부**다. 체결이 아니다. 실행 기록의 '완료' 도 사이클이
 #   끝났다는 뜻이지 매도가 됐다는 뜻이 아니다 — 둘을 섞어 읽으면 팔린 줄 알고 넘어간다.
-st.caption("상태: INTENT_RECORDED(의도 기록) · ACKNOWLEDGED(**접수**, 체결 아님) · "
-           "PARTIALLY_FILLED / FILLED(체결) · CANCELED · REJECTED(거절) · "
-           "DEFERRED(상태 불명이라 보류) · UNKNOWN(제출 결과 미확인 — 계좌에서 확인 필요) · "
-           "skipped(사유 코드). 체결 여부는 토스 앱/계좌 조회로 확인하세요.")
-_orders = q("SELECT timestamp, run_id, symbol, side, quantity, amount_usd, price, status, "
-            "order_id, reason FROM orders ORDER BY id DESC LIMIT 300")
+st.caption("상태(매 사이클 브로커와 대사됨): INTENT_RECORDED(의도 기록) · "
+           "ACKNOWLEDGED(**접수**, 체결 아님) · PARTIALLY_FILLED / FILLED(**체결**) · "
+           "CANCEL_PENDING(취소 요청, 완료 아님) · CANCELED · REJECTED · CANCEL_REJECTED · "
+           "REPLACED · DEFERRED(상태 불명이라 보류) · UNKNOWN(대사 불가 — 계좌에서 확인) · "
+           "skipped(사유 코드). filled_quantity 가 실제 체결 수량입니다.")
+_orders = q("SELECT timestamp, run_id, symbol, side, quantity, filled_quantity, "
+            "amount_usd, price, status, reconciled_at, order_id, client_order_id, reason "
+            "FROM orders ORDER BY id DESC LIMIT 300")
 _attn = _orders[_orders["status"].astype(str).str.startswith(("UNKNOWN", "DEFERRED"))]
 if len(_attn):
     st.warning(f"확인이 필요한 주문 {len(_attn)}건 — 접수 여부·매도 가능 수량을 확인하지 못해 "

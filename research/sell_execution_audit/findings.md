@@ -140,3 +140,49 @@ MRNA($58.16)→$1.28 ✘ · MU($54.76)→−$2.13 ✘ · KDP($31.25)→−$25.63
    남기고 백업본을 뜨는 형태)로 하는 것을 권한다.
 3. 확인이 끝나기 전에는 `VOL_TARGET_PCT=0` 으로 두어 **점등 자체를 막는 것**이 안전하다.
    (이것도 설정 변경이므로 승인 사항이다.)
+
+## 8. 공식 스펙으로 확정된 계약 (2026-09-16 추가)
+
+출처: `https://openapi.tossinvest.com/openapi-docs/latest/openapi.json` (**인증 없는 공개
+문서**, `GET` 만. 계좌·주문 API 는 호출하지 않았다). 토스증권 Open API **1.2.17**.
+§4 에 "미확인"으로 적었던 항목이 대부분 확정됐고, **새 확정 결함 2건**이 나왔다.
+
+| 항목 | 스펙이 말하는 것 | 코드에 미친 영향 |
+|---|---|---|
+| `clientOrderId` | 멱등성 키. 전달 시 동일 값 재요청은 이전 주문 결과를 재반환. **유효 10분**, 이후 동일 값은 **새 주문**. 최대 36자, `^[a-zA-Z0-9\-_]+$` | `intent_key` 는 **30분 버킷** — 10~30분 사이 재제출은 브로커 멱등성 밖이다. 키를 바꾸지 않고, 중복 방어를 **미체결 잔량 대사**에 둔다 (L6·F4). 키 길이·패턴은 적합 |
+| `GET /orders` 페이징 | `status=OPEN` 전량. **`status=CLOSED` 는 `limit` 기본 20 / 최대 100 + `cursor`** (`nextCursor`·`hasNext`) | **확정 결함 ①**: `toss.orders("CLOSED")` 가 최근 20건만 가져왔다 → 진입일 복원·대사가 20건 창에 갇혀 있었다. `orders_all()` 추가 (L1–L4) |
+| 조회 범위 | "Open API 가 지원하는 호가 유형(지정가·시장가·장마감지정가)으로 접수된 주문만 반환. 장후·장전 시간외 종가 주문은 **목록과 상세 조회 모두에서 조회되지 않는다**" | **확정 결함 ②(설계 한계)**: 사용자가 앱에서 시간외로 산 종목은 진입일을 영영 복원할 수 없다. → `ENTRY_UNVERIFIED` 로 만기 판단에서 제외하는 것이 유일하게 맞는 처리 |
+| `orders[].status` | `PENDING · PENDING_CANCEL · PENDING_REPLACE · PARTIAL_FILLED · FILLED · CANCELED · REJECTED · CANCEL_REJECTED · REPLACE_REJECTED · REPLACED`. 쿼리의 `OPEN/CLOSED` 와 **값 체계가 다르다**. `PARTIAL_FILLED` 는 양쪽 그룹에 나온다. "클라이언트는 unknown code 를 허용할 것" | `order_state()` 를 **실제 enum 으로 교체**. 모르는 코드는 UNKNOWN (C3) |
+| 잔량 필드 | **없다.** `quantity` − `execution.filledQuantity` 로 계산 | `remaining_qty()` 로 명시 (C5) |
+| 취소·정정 거부 | `CANCEL_REJECTED`/`REPLACE_REJECTED` 는 **별도 주문 레코드**로 생기고 원주문은 이전 상태로 복귀 | 원주문의 결말로 쓰지 않는다 |
+| 소수점 수량 | US `MARKET`+`SELL` 만. **소수점 6자리**까지(초과 시 `fractional-quantity-scale-exceeded`). 정규장 시작~**종료 1시간 전**만 접수, 밖이면 `422 fractional-quantity-outside-regular-hours` | 기존 `f"{q:.6f}"` 와 `fractional_allowed()` 가 **정확히 일치**한다 (L5). 2026-09-08 WDAY 400 의 원인도 이것 |
+| `price` 정밀도 | US: $1 이상 소수 2자리, $1 미만 4자리, 초과분 **절삭** | 현재 `round(x, 2)` — $1 미만 종목에서 정밀도 손실은 있으나 거절되진 않는다 |
+| `timeInForce` | 미전달 시 `DAY` — **정규장 종료까지 미체결분은 자동 취소** | 코드는 미전달(=DAY). 미체결 매도는 다음 날로 넘어가지 않는다 |
+| `cashBuyingPower` | "현금 기반 매수 가능 금액(미수 미발생 기준)" | **여전히 미확인**: 미체결 매수 금액을 이미 차감한 값인지 문서에 없다 (J4 유지) |
+
+## 9. 접수 → 체결 대사 루프 (시나리오 M)
+
+`reconcile_orders(toss)` 를 `run_cycle` 이 계좌 조회 직후 부른다. 이것이 **ACK 와 FILL 을
+잇는 유일한 경로**다 — 없으면 DB 는 영원히 ACKNOWLEDGED 에 멈춘다 (TEAM 2026-09-09).
+
+- 대상: `client_order_id` 가 있고 상태가 `INTENT_RECORDED / ACKNOWLEDGED / PARTIALLY_FILLED
+  / CANCEL_PENDING / UNKNOWN` 인 행 (최근 100건).
+- 비용: 사이클당 조회 2종(OPEN 전량 + CLOSED 페이징). 목록에서 못 찾고 brokerId 가 있을
+  때만 `GET /orders/{orderId}` 폴백 (M7).
+- **조회가 실패하면 아무 상태도 바꾸지 않는다** (M4). 목록을 다 읽었는데도 없으면
+  `CANCELED` 가 아니라 `UNKNOWN: 계좌 이력에서 찾지 못함` 이다 (M5).
+- 레거시 `submitted` 행은 `client_order_id` 가 없어 **대사 대상이 아니고 변환하지도 않는다**
+  (M6). 대신 건수를 경고로 남긴다.
+
+### DB 스키마 변경 (추가만)
+`orders` 에 `client_order_id TEXT` · `filled_quantity REAL` · `reconciled_at TEXT` 를
+`initialize_db()` 의 기존 `ALTER TABLE` 패턴으로 추가한다. 운영 DB **사본**으로 리허설:
+
+```
+행수 before/after: runs 65 / orders 51 / trading_decisions 608 / equity 5  — 동일
+기존 orders 51행 (상태·order_id 포함) 동일: True
+신규 컬럼 전부 NULL: True        재실행 멱등: True
+```
+
+롤백: 코드만 되돌리면 된다. 추가 컬럼은 남지만 이전 코드는 컬럼을 명시 지정해 읽으므로
+무시된다. **레거시 `submitted` 를 `filled` 로 바꾸는 변환은 하지 않았다.**

@@ -68,6 +68,7 @@ class FakeBroker:
         self.post_reaches_broker = post_reaches_broker
         self.session_open = session_open
         self.calls = []                      # 상태 변경 호출만 기록
+        self.pages = 0                       # CLOSED 페이지 요청 횟수
 
     # ---- 조회 ----
     def holdings(self, symbol=None):
@@ -81,13 +82,44 @@ class FakeBroker:
     def buying_power(self, currency="USD"):
         return {"cashBuyingPower": str(self.cash)}
 
-    def orders(self, status="OPEN", symbol=None):
+    def orders(self, status="OPEN", symbol=None, limit=None, cursor=None,
+               from_date=None, to_date=None):
+        """공식 스펙대로 흉내낸다: OPEN 은 전량, CLOSED 는 limit(기본 20·최대 100)+cursor."""
         if "orders" in self.fail:
             raise TossError(503, "retry-exhausted", "주문 조회 실패")
         rows = self.open_rows if status == "OPEN" else self.closed_rows
         if symbol:
             rows = [r for r in rows if r.get("symbol") == symbol]
-        return {"orders": [dict(r) for r in rows]}
+        if status == "OPEN":
+            return {"orders": [dict(r) for r in rows], "nextCursor": None, "hasNext": False}
+        n = min(int(limit or 20), 100)
+        i = int(cursor or 0)
+        page = rows[i:i + n]
+        has = i + n < len(rows)
+        self.pages += 1
+        return {"orders": [dict(r) for r in page],
+                "nextCursor": str(i + n) if has else None, "hasNext": has}
+
+    def orders_all(self, status="OPEN", symbol=None, from_date=None, to_date=None,
+                   max_pages=20):
+        rows, cursor, complete = [], None, True
+        for _ in range(max_pages):
+            r = self.orders(status, symbol=symbol, limit=100, cursor=cursor) or {}
+            rows.extend(r.get("orders") or [])
+            cursor = r.get("nextCursor")
+            if not r.get("hasNext") or not cursor:
+                break
+        else:
+            complete = False
+        return rows, complete
+
+    def order(self, order_id):
+        if "order_detail" in self.fail:
+            raise TossError(503, "retry-exhausted", "주문 상세 조회 실패")
+        for r in self.open_rows + self.closed_rows:
+            if r.get("orderId") == order_id:
+                return dict(r)
+        raise TossError(404, "not-found", "없는 주문")
 
     def sellable_quantity(self, symbol):
         if "sellable" in self.fail:
@@ -109,7 +141,7 @@ class FakeBroker:
                      order_amount=None, time_in_force=None, client_order_id=None):
         self.calls.append(("create", symbol, side, quantity, order_amount, client_order_id))
         row = {"orderId": f"B{len(self.calls)}", "clientOrderId": client_order_id,
-               "symbol": symbol, "side": side, "status": "OPEN",
+               "symbol": symbol, "side": side, "status": "PENDING",
                "quantity": quantity, "execution": {"filledQuantity": "0"}}
         if "create" in self.fail:
             if self.post_reaches_broker:     # 브로커엔 닿았고 응답만 못 받았다
@@ -366,31 +398,42 @@ def _c2():
     return f"orderId={found.get('orderId')}"
 
 
-@scenario("C3", "CLOSED 의 FILLED / CANCELED / REJECTED / 부분체결 구분", "C")
+@scenario("C3", "공식 status enum 10종 → 내부 상태 매핑", "C")
 def _c3():
+    """값은 추측이 아니라 openapi 1.2.17 의 OrderStatus enum 이다."""
     f = at.order_state
-    cases = {
-        "FILLED": {"status": "FILLED", "quantity": "3", "execution": {"filledQuantity": "3"}},
-        "CANCELED": {"status": "CANCELED", "quantity": "3",
-                     "execution": {"filledQuantity": "0"}},
-        "REJECTED": {"status": "REJECTED", "quantity": "3"},
-        "PARTIALLY_FILLED": {"status": "OPEN", "quantity": "5",
-                             "execution": {"filledQuantity": "2"}},
-        "UNKNOWN": {"status": "CLOSED", "quantity": "3",
-                    "execution": {"filledQuantity": "0"}},
-    }
-    got = {k: f(v) for k, v in cases.items()}
-    assert got == {k: k for k in cases}, got
-    assert f(None) == "UNKNOWN", f(None)
-    return "5개 상태 + None→UNKNOWN 모두 일치"
+    ex = lambda q: {"execution": {"filledQuantity": str(q)}}          # noqa: E731
+    cases = [
+        ("PENDING", 0, "ACKNOWLEDGED"), ("PENDING_CANCEL", 0, "CANCEL_PENDING"),
+        ("PENDING_REPLACE", 0, "CANCEL_PENDING"), ("PARTIAL_FILLED", 2, "PARTIALLY_FILLED"),
+        ("FILLED", 5, "FILLED"), ("CANCELED", 0, "CANCELED"),
+        ("CANCELED", 4, "CANCELED"),          # 부분 체결 뒤 취소도 CANCELED
+        ("REJECTED", 0, "REJECTED"), ("CANCEL_REJECTED", 0, "CANCEL_REJECTED"),
+        ("REPLACE_REJECTED", 0, "CANCEL_REJECTED"), ("REPLACED", 3, "REPLACED"),
+        ("SOME_NEW_CODE", 0, "UNKNOWN"),      # 스펙: unknown code 를 허용할 것
+        ("OPEN", 0, "UNKNOWN"),               # 쿼리 라벨은 주문 상태가 아니다
+    ]
+    got = [(st, f({"status": st, "quantity": "5", **ex(q)})) for st, q, _ in cases]
+    want = [(st, w) for st, _, w in cases]
+    assert got == want, [g for g, w in zip(got, want) if g != w]
+    assert f(None) == "UNKNOWN"
+    return f"{len(cases)}개 매핑 일치 (unknown code·쿼리 라벨 → UNKNOWN)"
 
 
-@scenario("C4", "부분 체결 뒤 취소는 CANCELED (남은 목표는 다음 사이클)", "C")
+@scenario("C4", "PENDING_CANCEL 은 CANCELED 가 아니다 (취소 요청 ≠ 취소 완료)", "C")
 def _c4():
-    st = at.order_state({"status": "CANCELED", "quantity": "10",
-                         "execution": {"filledQuantity": "4"}})
-    assert st == "CANCELED", st
-    return "CANCELED (체결 4/10 은 계좌 수량으로 반영된다)"
+    assert at.order_state({"status": "PENDING_CANCEL", "quantity": "10",
+                           "execution": {"filledQuantity": "0"}}) == "CANCEL_PENDING"
+    return "CANCEL_PENDING"
+
+
+@scenario("C5", "remaining 필드는 없다 — quantity − filledQuantity 로 계산한다", "C")
+def _c5():
+    r = {"status": "PARTIAL_FILLED", "quantity": "10",
+         "execution": {"filledQuantity": "3.5"}}
+    assert at.remaining_qty(r) == 6.5 and at.filled_qty(r) == 3.5, at.remaining_qty(r)
+    assert at.remaining_qty({"quantity": None}) == 0.0
+    return "잔량 6.5 = 10 − 3.5"
 
 
 # ═══════════════ D. 제출 결과의 구조화 (SUBMIT → ACK) ═══════════════
@@ -971,6 +1014,190 @@ def _k2():
                 "'하락장이면 항상 발동'이 아니라 '후보 판단이 있는 본 패스에서만' 이다")
     finally:
         at.MOMENTUM_EXIT = old
+
+
+# ═══ L. 공식 스펙(openapi 1.2.17)에서 확정된 계약 ═══
+# 출처: https://openapi.tossinvest.com/openapi-docs/latest/openapi.json (인증 없는 공개 문서)
+def _many_closed(n, sym="AAPL"):
+    return [{"orderId": f"O{i}", "clientOrderId": f"c{i}", "symbol": sym,
+             "side": "BUY" if i % 2 else "SELL", "status": "FILLED",
+             "quantity": "1", "orderedAt": f"2026-01-{i % 28 + 1:02d}T10:00:00+09:00",
+             "execution": {"filledQuantity": "1"}} for i in range(n)]
+
+
+@scenario("L1", "CLOSED 는 limit 기본 20 — 페이징 없이는 최근 20건만 온다", "L")
+def _l1():
+    b = FakeBroker(closed=_many_closed(150))
+    one = b.orders("CLOSED")                      # 파라미터 없이 = 예전 코드의 호출
+    assert len(one["orders"]) == 20 and one["hasNext"] is True, len(one["orders"])
+    rows, complete = b.orders_all("CLOSED")
+    assert len(rows) == 150 and complete, (len(rows), complete)
+    return f"limit 미지정 20건(hasNext=True) → orders_all 150건 전량"
+
+
+@scenario("L2", "체결 이력이 20건을 넘어도 진입일이 복원된다", "L")
+def _l2():
+    """예전 코드가 조용히 틀리던 지점 — 오래된 진입이 20건 창 밖으로 밀려났다."""
+    noise = _many_closed(60, "NOISE")
+    hist = [closed_row("AAPL", "BUY", 10, "2026-01-02T10:00:00+09:00", "A1")] + noise
+    b = FakeBroker(closed=hist)
+    e = entry_map(b, {"AAPL": hold(10, 100, 100)})
+    assert str(e.get("AAPL")).startswith("2026-01-02"), (e, at.ENTRY_UNVERIFIED)
+    assert "AAPL" not in at.ENTRY_UNVERIFIED, at.ENTRY_UNVERIFIED
+    return "잡음 60건 뒤에 있는 진입도 찾는다"
+
+
+@scenario("L3", "페이지를 다 못 읽으면 전부 미검증 — 없다로 읽지 않는다", "L")
+def _l3():
+    b = FakeBroker(closed=_many_closed(5000))     # max_pages(20)x100 = 2000 < 5000
+    entry_map(b, {"AAPL": hold(1, 100, 100)})
+    assert "AAPL" in at.ENTRY_UNVERIFIED, at.ENTRY_UNVERIFIED
+    return "목록 불완전 → ENTRY_UNVERIFIED (만기 청산 보류)"
+
+
+@scenario("L4", "대사도 페이징한다 — 20건 밖의 주문을 NOT_FOUND 로 읽지 않는다", "L")
+def _l4():
+    noise = _many_closed(80)
+    target = {"orderId": "REAL", "clientOrderId": "mine", "symbol": "AAPL",
+              "side": "SELL", "status": "FILLED", "quantity": "1",
+              "execution": {"filledQuantity": "1"}}
+    b = FakeBroker(closed=noise + [target])
+    found, known = at.find_order(b, "mine")
+    assert known and found is not None and found["orderId"] == "REAL", (found, known)
+    return "81건 중 마지막 건도 찾는다"
+
+
+@scenario("L5", "소수점 매도 계약 — 6자리·MARKET·정규장 (코드와 일치)", "L")
+def _l5():
+    """스펙: 소수점 수량은 US MARKET+SELL 만, 소수점 6자리까지, 정규장~마감 1시간 전."""
+    b = FakeBroker(sellable=0.6218325)
+    at.place_order(b, {"symbol": "AAPL", "side": "sell", "quantity": 0.6218325,
+                       "cancel_first": True, "amount_usd": 12.0, "price": 20.0,
+                       "reason": "t", "whole": False})
+    q = b.last_qty()
+    assert len(q.split(".")[1]) <= 6, q
+    a = acct(100, {"AAPL": hold(0.62, 20, 20)})
+    out, _ = vo(a, entries={"AAPL": 20}, session=OFF)
+    assert not out, out
+    return f"제출 수량 {q} (6자리 이내) · 장외는 의도 단계에서 차단"
+
+
+@scenario("L6", "clientOrderId 멱등성 창은 10분 — intent_key 30분 버킷과 어긋난다", "L")
+def _l6():
+    """스펙: 멱등성 키는 10분간 유효하며 이후 동일 값은 새 주문으로 처리된다.
+    → 같은 30분 슬롯이라도 10분이 지나면 같은 키가 중복 주문이 된다.
+    막아 주는 것은 키가 아니라 계좌 대사(F4)다. 그 어긋남을 여기서 고정한다."""
+    o = {"symbol": "AAPL", "side": "sell"}
+    t0 = datetime.datetime(2026, 3, 4, 10, 0, tzinfo=at.NY)
+    t11 = t0 + datetime.timedelta(minutes=11)
+    assert at.intent_key(o, t0) == at.intent_key(o, t11), "버킷은 같다"
+    key = at.intent_key(o, t0)
+    assert len(key) <= 36 and key.replace("-", "").replace("_", "").isalnum(), key
+    return (f"키 {key} (36자·패턴 OK). 같은 슬롯이지만 11분 뒤 재제출은 브로커 멱등성 "
+            "밖 — 중복 방어는 미체결 잔량 대사에 의존한다")
+
+
+# ═══ M. 접수 → 체결 대사 루프 ═══
+def _seed(db, coid, sym="AAPL", side="sell", status="ACKNOWLEDGED", oid="B1"):
+    with sqlite3.connect(db) as c:
+        c.execute("INSERT INTO orders (run_id,timestamp,symbol,side,quantity,amount_usd,"
+                  "price,order_id,client_order_id,status,reason) "
+                  "VALUES (1,?,?,?,?,?,?,?,?,?,'t')",
+                  (at._now(), sym, side, 10.0, 1000.0, 100.0, oid, coid, status))
+
+
+def _rows(db):
+    with sqlite3.connect(db) as c:
+        return c.execute("SELECT status, filled_quantity FROM orders ORDER BY id").fetchall()
+
+
+@scenario("M1", "접수만 된 주문이 체결되면 FILLED 로 닫힌다", "M")
+def _m1():
+    db = tmpdb()
+    _seed(db, "c1")
+    b = FakeBroker(closed=[{"orderId": "B1", "clientOrderId": "c1", "symbol": "AAPL",
+                            "side": "SELL", "status": "FILLED", "quantity": "10",
+                            "execution": {"filledQuantity": "10"}}])
+    at.reconcile_orders(b)
+    assert _rows(db) == [("FILLED", 10.0)], _rows(db)
+    return "ACKNOWLEDGED → FILLED (체결 10)"
+
+
+@scenario("M2", "TEAM 재현 — 접수됐지만 안 팔린 주문은 ACKNOWLEDGED 로 남는다", "M")
+def _m2():
+    db = tmpdb()
+    _seed(db, "c1", sym="TEAM")
+    b = FakeBroker(opens=[{"orderId": "B1", "clientOrderId": "c1", "symbol": "TEAM",
+                           "side": "SELL", "status": "PENDING", "quantity": "0.09306",
+                           "execution": {"filledQuantity": "0"}}])
+    at.reconcile_orders(b)
+    assert _rows(db)[0][0] == "ACKNOWLEDGED", _rows(db)
+    return "여전히 ACKNOWLEDGED — 접수됐고 아직 안 팔렸다가 이제 DB 에 남는다"
+
+
+@scenario("M3", "부분 체결·거절·취소가 각각 구분되어 닫힌다", "M")
+def _m3():
+    db = tmpdb()
+    for i, coid in enumerate(["c1", "c2", "c3"]):
+        _seed(db, coid, oid=f"B{i}")
+    b = FakeBroker(closed=[
+        {"orderId": "B0", "clientOrderId": "c1", "symbol": "AAPL", "side": "SELL",
+         "status": "PARTIAL_FILLED", "quantity": "10", "execution": {"filledQuantity": "4"}},
+        {"orderId": "B1", "clientOrderId": "c2", "symbol": "AAPL", "side": "SELL",
+         "status": "REJECTED", "quantity": "10", "execution": {"filledQuantity": "0"}},
+        {"orderId": "B2", "clientOrderId": "c3", "symbol": "AAPL", "side": "SELL",
+         "status": "CANCELED", "quantity": "10", "execution": {"filledQuantity": "2"}}])
+    at.reconcile_orders(b)
+    got = _rows(db)
+    assert got == [("PARTIALLY_FILLED", 4.0), ("REJECTED", 0.0), ("CANCELED", 2.0)], got
+    return str(got)
+
+
+@scenario("M4", "대사 조회가 실패하면 상태를 바꾸지 않는다", "M")
+def _m4():
+    db = tmpdb()
+    _seed(db, "c1")
+    b = FakeBroker(fail={"orders"})
+    out = at.reconcile_orders(b)
+    assert _rows(db) == [("ACKNOWLEDGED", None)], _rows(db)
+    assert out == {}, out
+    return "조회 실패 → 무변경 (모르는 것을 닫지 않는다)"
+
+
+@scenario("M5", "목록에 없어도 CANCELED 로 단정하지 않는다", "M")
+def _m5():
+    db = tmpdb()
+    _seed(db, "c1", oid="c1")            # brokerId 없음 (= coid 그대로)
+    b = FakeBroker()
+    at.reconcile_orders(b)
+    st = _rows(db)[0][0]
+    assert st.startswith("UNKNOWN"), _rows(db)
+    return st
+
+
+@scenario("M6", "레거시 submitted 행은 대사 대상이 아니고 변환하지도 않는다", "M")
+def _m6():
+    db = tmpdb()
+    with sqlite3.connect(db) as c:
+        c.execute("INSERT INTO orders (run_id,timestamp,symbol,side,order_id,status) "
+                  "VALUES (1,?,?,?,?,?)", (at._now(), "TEAM", "sell", "OLD", "submitted"))
+    b = FakeBroker()
+    at.reconcile_orders(b)
+    assert _rows(db) == [("submitted", None)], _rows(db)
+    return "그대로 submitted — 근거 없이 filled 로 바꾸지 않는다"
+
+
+@scenario("M7", "brokerId 로 개별 조회 폴백", "M")
+def _m7():
+    db = tmpdb()
+    _seed(db, "c1", oid="BX")
+    b = FakeBroker()
+    b.order = lambda oid: ({"orderId": "BX", "status": "FILLED", "quantity": "10",
+                            "execution": {"filledQuantity": "10"}} if oid == "BX"
+                           else None)
+    at.reconcile_orders(b)
+    assert _rows(db) == [("FILLED", 10.0)], _rows(db)
+    return "목록에 없으면 GET /orders/{orderId} 로 확인"
 
 
 # ────────────────────────────── 실행 ──────────────────────────────

@@ -210,9 +210,38 @@ class TossClient:
             body["quantity"] = str(quantity)
         return self._call("POST", f"/api/v1/orders/{order_id}/modify", json=body, account=True)
 
-    def orders(self, status="OPEN", symbol=None):
-        return self._call("GET", "/api/v1/orders",
-                          params={"status": status, "symbol": symbol}, account=True)
+    def orders(self, status="OPEN", symbol=None, limit=None, cursor=None,
+               from_date=None, to_date=None):
+        """주문 목록 한 페이지.
+
+        공식 스펙(openapi 1.2.17) 확인 사항:
+          · status=OPEN  — 대기 중 주문을 **전량** 반환. limit·cursor 는 무시된다.
+          · status=CLOSED — **limit 기본 20 / 최대 100 + cursor 페이징.**
+            ★ 파라미터 없이 부르면 최근 20건만 온다. 전량이 필요하면 orders_all 을 쓸 것.
+          · from/to 는 orderedAt(KST) 기준 날짜 필터.
+        """
+        return self._call("GET", "/api/v1/orders", account=True, params={
+            "status": status, "symbol": symbol, "limit": limit, "cursor": cursor,
+            "from": from_date, "to": to_date})
+
+    def orders_all(self, status="OPEN", symbol=None, from_date=None, to_date=None,
+                   max_pages=20):
+        """주문 목록 전량 → (행 목록, 완전히 읽었는가).
+
+        ★ 두 번째 값이 False 면 **끊긴 목록**이다. 호출자는 그걸 '없다'로 읽으면 안 된다
+          (진입일 복원이 조용히 틀리는 경로가 정확히 이것이었다).
+        """
+        rows, cursor, complete = [], None, True
+        for _ in range(max_pages):
+            r = self.orders(status, symbol=symbol, limit=100, cursor=cursor,
+                            from_date=from_date, to_date=to_date) or {}
+            rows.extend(r.get("orders") or [])
+            cursor = r.get("nextCursor")
+            if not r.get("hasNext") or not cursor:
+                break
+        else:
+            complete = False          # max_pages 를 다 쓰고도 다음 페이지가 남았다
+        return rows, complete
 
     def order(self, order_id):
         return self._call("GET", f"/api/v1/orders/{order_id}", account=True)

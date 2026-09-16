@@ -124,34 +124,64 @@ class Deferred(Exception):
     """
 
 
-# 브로커 상태 → 내부 상태. 토스 응답의 status 는 OPEN/CLOSED 두 단계뿐이라
-# 세부 결과(체결·취소·거절)는 execution 과 함께 봐야 구분된다.
-#   INTENT_RECORDED → SUBMITTING → ACKNOWLEDGED → PARTIALLY_FILLED → FILLED
-#                                              ↘ CANCEL_PENDING → CANCELED
-#                                              ↘ REJECTED / UNKNOWN / DEFERRED
+# 브로커 상태 → 내부 상태.
+#
+# ★ 공식 스펙(openapi 1.2.17) 으로 확인한 사실:
+#   · GET /orders 의 `status=OPEN|CLOSED` 는 **쿼리 필터 라벨**이고, 각 주문의
+#     `orders[].status` 는 아래 10개 enum 이다. 둘은 값 체계가 다르다.
+#   · PARTIAL_FILLED 는 OPEN·CLOSED **양쪽 그룹에 모두** 나온다.
+#   · CANCELED·REJECTED·REPLACED 도 execution.filledQuantity 로 부분 체결을 확인해야 한다.
+#   · remaining 필드는 없다 — quantity − execution.filledQuantity 로 계산한다.
+#   · "클라이언트는 unknown code 를 허용하도록 구현해야 합니다" → 모르는 값은 UNKNOWN.
+BROKER_STATE = {
+    "PENDING": "ACKNOWLEDGED",          # 접수, 체결 대기
+    "PENDING_CANCEL": "CANCEL_PENDING",  # 취소 '요청'일 뿐 취소 완료가 아니다
+    "PENDING_REPLACE": "CANCEL_PENDING",
+    "PARTIAL_FILLED": "PARTIALLY_FILLED",
+    "FILLED": "FILLED",
+    "CANCELED": "CANCELED",
+    "REJECTED": "REJECTED",
+    # 취소·정정 거부는 **별도 주문 레코드**로 생기고 원주문은 이전 상태로 복귀한다.
+    # 원주문의 결말이 아니므로 우리 쪽 의도의 상태로 쓰지 않는다.
+    "CANCEL_REJECTED": "CANCEL_REJECTED",
+    "REPLACE_REJECTED": "CANCEL_REJECTED",
+    "REPLACED": "REPLACED",
+}
+
+
 def order_state(row):
-    """주문 한 건의 내부 상태. row 가 None 이면 UNKNOWN(= '없다' 가 아니다)."""
+    """주문 한 건의 내부 상태. row 가 None 이면 UNKNOWN(= '없다' 가 아니다).
+
+    내부 상태: INTENT_RECORDED → ACKNOWLEDGED → PARTIALLY_FILLED → FILLED
+                              ↘ CANCEL_PENDING → CANCELED / CANCEL_REJECTED
+                              ↘ REJECTED / REPLACED / UNKNOWN / DEFERRED
+    """
     if not row:
         return "UNKNOWN"
-    st = str(row.get("status") or "").upper()
+    st = BROKER_STATE.get(str(row.get("status") or "").upper())
+    if st is None:
+        return "UNKNOWN"            # 스펙이 말한 unknown code — 추측하지 않는다
+    if st == "FILLED":
+        return "FILLED"
+    if st == "ACKNOWLEDGED" and filled_qty(row) > 0:
+        return "PARTIALLY_FILLED"   # 방어적: PENDING 인데 체결이 있으면 부분 체결이다
+    return st
+
+
+def filled_qty(row):
     try:
-        filled = float((row.get("execution") or {}).get("filledQuantity") or 0)
+        return float((row.get("execution") or {}).get("filledQuantity") or 0)
     except (TypeError, ValueError):
-        filled = 0.0
+        return 0.0
+
+
+def remaining_qty(row):
+    """미체결 잔량. 스펙에 remaining 필드가 없어 직접 뺀다."""
     try:
         total = float(row.get("quantity") or 0)
     except (TypeError, ValueError):
         total = 0.0
-    if st in ("REJECTED", "CANCELED", "CANCELLED", "EXPIRED"):
-        # 부분 체결 뒤 취소도 취소다 — 남은 목표량은 다음 사이클이 다시 본다.
-        return "CANCELED" if st != "REJECTED" else "REJECTED"
-    if st == "FILLED" or (total and filled >= total - 1e-9):
-        return "FILLED"
-    if filled > 0:
-        return "PARTIALLY_FILLED"
-    if st == "CLOSED":            # 체결도 거절도 아닌 CLOSED — 세부를 모른다
-        return "UNKNOWN"
-    return "ACKNOWLEDGED"
+    return max(0.0, total - filled_qty(row))
 
 
 # 진입일을 브로커 체결 이력으로 **검증하지 못한** 종목. 만기 청산은 여기 든 종목을
@@ -216,6 +246,14 @@ def initialize_db():
         for col, typ in (("stock_value", "REAL"), ("cashflow", "REAL")):
             if col not in ecols:
                 conn.execute(f"ALTER TABLE equity ADD COLUMN {col} {typ}")
+        # clientOrderId(우리 키)와 brokerId(그쪽 키)는 **다른 것**이다. 예전에는 order_id
+        # 하나에 덮어썼더니 접수 후에는 대사할 키가 사라졌다. 컬럼만 추가하고 기존 행은
+        # 그대로 둔다 — 레거시 'submitted' 를 근거 없이 filled 로 바꾸지 않는다.
+        ocols = [r[1] for r in conn.execute("PRAGMA table_info(orders)")]
+        for col, typ in (("client_order_id", "TEXT"), ("filled_quantity", "REAL"),
+                         ("reconciled_at", "TEXT")):
+            if col not in ocols:
+                conn.execute(f"ALTER TABLE orders ADD COLUMN {col} {typ}")
         cols = [r[1] for r in conn.execute("PRAGMA table_info(trading_decisions)")]
         if "run_id" not in cols:   # 단일 종목 버전 DB 호환
             conn.execute("ALTER TABLE trading_decisions ADD COLUMN run_id INTEGER")
@@ -369,20 +407,27 @@ def db_update_run(run_id, **fields):
 
 
 def filled_orders(toss):
-    """계좌의 체결 완료 주문 (토스 status=CLOSED). 실패하면 빈 목록.
+    """체결이 있는 주문 전량 → (행 목록, 완전히 읽었는가).
 
-    ★ 미확인 계약: 이 호출이 **전 기간**을 돌려주는지, 페이지네이션 파라미터가 있는지,
-      OPEN 상태의 부분 체결이 포함되는지 공식 문서로 확인하지 못했다. 그래서 여기서
-      이력을 '완전하다' 고 가정하지 않고, position_entry_map 이 현재 holdings 수량과
-      대조해 어긋나면 ENTRY_UNVERIFIED 로 표시한다.
+    ★ 확정 결함이었다: `toss.orders("CLOSED")` 는 **기본 limit=20** 이라 최근 20건만
+      왔다 (공식 스펙 1.2.17). 7종목의 매수·매도가 쌓이면 금방 넘는다. 이제 커서로
+      전량을 읽고, 다 못 읽으면 complete=False 로 알린다.
+    ★ OPEN 그룹의 PARTIAL_FILLED 도 체결이므로 같이 센다 — 스펙상 PARTIAL_FILLED 는
+      OPEN·CLOSED 양쪽에 나온다.
+    ★ 남은 한계(스펙 명시): Open API 가 지원하는 호가 유형(지정가·시장가·장마감지정가)
+      으로 접수된 주문만 조회된다. 사용자가 앱에서 시간외 종가 등으로 낸 주문은
+      **여기서 영영 보이지 않는다.** 그래서 수량 대조가 필요하다.
     """
-    try:
-        rows = (toss.orders("CLOSED") or {}).get("orders") or []
-    except Exception as e:  # noqa: BLE001
-        log.warning("체결 이력 조회 실패: %s", e)
-        return []
-    return [o for o in rows
-            if (o.get("execution") or {}).get("filledQuantity") and o.get("orderedAt")]
+    rows, complete = [], True
+    for status in ("CLOSED", "OPEN"):
+        try:
+            r, ok = toss.orders_all(status)
+            rows += r
+            complete = complete and ok
+        except Exception as e:  # noqa: BLE001
+            log.warning("체결 이력(%s) 조회 실패: %s", status, e)
+            complete = False
+    return ([o for o in rows if filled_qty(o) > 0 and o.get("orderedAt")], complete)
 
 
 def position_entry_map(toss=None, holdings=None):
@@ -398,16 +443,19 @@ def position_entry_map(toss=None, holdings=None):
     복원한 수량을 현재 holdings 와 대조한다. 어긋나거나 이력에 아예 없는 보유 종목은
     **이력이 불완전한 것**(페이지네이션·조회 범위·다른 채널 매수)이므로 ENTRY_UNVERIFIED
     에 넣고 만기 판단에서 뺀다. 오늘 날짜를 넣거나 만기 초과로 간주하지 않는다.
-    ★ 페이지네이션 계약 미확인: toss.orders("CLOSED") 가 전 기간을 돌려주는지, 페이지
-      파라미터가 있는지 공식 문서로 확인되지 않았다. 그래서 '이력을 믿는다'가 아니라
-      '수량이 맞을 때만 믿는다' 로 만들었다.
+    ★ 이력을 '완전하다'고 가정하지 않는다. 스펙상 Open API 가 지원하지 않는 호가 유형
+      (시간외 종가 등)으로 낸 주문은 조회 자체가 되지 않고, 페이지를 다 못 읽을 수도
+      있다. 그래서 '이력을 믿는다'가 아니라 '수량이 맞을 때만 믿는다'.
     """
     unverified = set()
     out = {}
-    for o in sorted(filled_orders(toss) if toss else [], key=lambda x: x["orderedAt"]):
+    rows, complete = filled_orders(toss) if toss else ([], False)
+    if toss and not complete:
+        log.error("체결 이력을 끝까지 읽지 못했다 — 진입일 복원을 신뢰할 수 없다")
+    for o in sorted(rows, key=lambda x: x["orderedAt"]):
         sym = str(o.get("symbol", "")).upper()
         qty, opened = out.get(sym, (0.0, None))
-        f = float(o["execution"]["filledQuantity"])
+        f = filled_qty(o)
         if str(o.get("side", "")).upper() == "BUY":
             if qty <= 1e-9:
                 opened = o["orderedAt"]
@@ -430,6 +478,9 @@ def position_entry_map(toss=None, holdings=None):
             unverified.add(sym)
             log.warning("ENTRY_PARTIAL %s: 이력 복원 %.6f 주 ≠ 보유 %.6f 주 — 이력이 "
                         "불완전하다. 만기 판단에서 제외한다", sym, got, held_qty)
+    if not complete:
+        # 목록이 끊겼으면 수량이 우연히 맞아도 믿을 수 없다 — 전부 미검증으로 본다.
+        unverified |= set(holdings or {})
     if entries:
         ENTRY_UNVERIFIED.clear()
         ENTRY_UNVERIFIED.update(unverified)
@@ -618,14 +669,13 @@ def account_state(toss):
                 continue
             try:
                 q = float(o.get("quantity") or 0)
-                f = float((o.get("execution") or {}).get("filledQuantity") or 0)
             except (TypeError, ValueError):
-                q, f = 0.0, 0.0
+                q = 0.0
             by_sym.setdefault(sym, []).append({
                 "orderId": o.get("orderId"), "clientOrderId": o.get("clientOrderId"),
-                "side": str(o.get("side") or "").upper(), "quantity": q, "filled": f,
-                "remaining": max(0.0, q - f), "price": o.get("price"),
-                "state": order_state(o)})
+                "side": str(o.get("side") or "").upper(), "quantity": q,
+                "filled": filled_qty(o), "remaining": remaining_qty(o),
+                "price": o.get("price"), "state": order_state(o)})
     except Exception as e:  # noqa: BLE001
         log.error("미체결 조회 실패 — 미체결 상태 UNKNOWN. 이번 사이클의 신규 제출은 보류한다: %s", e)
         by_sym, unknown = {}, True
@@ -1363,13 +1413,16 @@ def find_order(toss, coid):
 
     ★ '조회 실패' 와 '정말 없다' 를 섞으면 안 된다. 둘 다 None 으로 돌려주면 타임아웃
       뒤에 "안 나갔네" 하고 같은 주문을 또 낸다. 두 번째 값이 False 면 UNKNOWN 이다.
+    ★ CLOSED 는 기본 limit=20 이라 페이징이 필수다. 끝까지 못 읽었으면 '없다'가 아니다.
     """
     known = True
     for st in ("OPEN", "CLOSED"):
         try:
-            for r in (toss.orders(st) or {}).get("orders") or []:
+            rows, complete = toss.orders_all(st)
+            for r in rows:
                 if r.get("clientOrderId") == coid:
                     return r, True
+            known = known and complete
         except Exception as e:  # noqa: BLE001
             known = False
             log.warning("주문 대사(%s) 실패 — 접수 여부 UNKNOWN: %s", st, e)
@@ -1467,8 +1520,8 @@ def place_all(toss, run_id, orders, dry, tag=""):
         row_id = db_insert("orders", {
             "run_id": run_id, "timestamp": _now(), "symbol": o["symbol"], "side": o["side"],
             "quantity": o["quantity"], "amount_usd": o["amount_usd"], "price": o["price"],
-            "order_id": coid, "status": "DRY_RUN" if dry else "INTENT_RECORDED",
-            "reason": o["reason"]})
+            "order_id": coid, "client_order_id": coid,
+            "status": "DRY_RUN" if dry else "INTENT_RECORDED", "reason": o["reason"]})
         if dry:
             results[o["symbol"]] = "DRY_RUN"
             log.info("[dry-run]%s %s %s $%.2f (%s주)", tag, o["side"], o["symbol"],
@@ -1511,6 +1564,78 @@ def place_all(toss, run_id, orders, dry, tag=""):
             conn.execute("UPDATE orders SET " + ", ".join(f"{k}=?" for k in fields) +
                          " WHERE id=?", [*fields.values(), row_id])
     return results
+
+
+def reconcile_orders(toss, limit=100):
+    """미완료 durable intent 를 브로커와 대사해 최종 상태로 닫는다 → 상태별 건수.
+
+    **이것이 '접수'와 '체결'을 잇는 유일한 경로다.** 이게 없으면 DB 는 영원히
+    ACKNOWLEDGED 에 멈춰 있고, 매도가 실제로 됐는지 아무도 모른다 (TEAM 2026-09-09).
+
+    호출 비용은 사이클당 조회 2종(OPEN 전량 + CLOSED 페이징)이다. 개별 주문 조회는
+    목록에서 못 찾은 건에 대해서만, brokerId 가 있을 때만 한다.
+    대사에 실패하면 **상태를 바꾸지 않는다** — 모르는 것을 닫지 않는다.
+    """
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            """SELECT id, symbol, side, client_order_id, order_id, status FROM orders
+               WHERE client_order_id IS NOT NULL
+                 AND (status = 'INTENT_RECORDED' OR status LIKE 'ACKNOWLEDGED%'
+                      OR status LIKE 'PARTIALLY_FILLED%' OR status LIKE 'CANCEL_PENDING%'
+                      OR status LIKE 'UNKNOWN%')
+               ORDER BY id DESC LIMIT ?""", (limit,)).fetchall()
+        legacy = conn.execute(
+            "SELECT COUNT(*) FROM orders WHERE client_order_id IS NULL "
+            "AND status IN ('submitted','pending','submitted (대사 확인)')").fetchone()[0]
+    if legacy:
+        log.warning("대사 불가 레거시 주문 %d건 — clientOrderId 를 기록하기 전 행이다. "
+                    "추측으로 체결 처리하지 않는다", legacy)
+    if not rows:
+        return {}
+    index, complete = {}, True
+    for st in ("OPEN", "CLOSED"):
+        try:
+            rs, ok = toss.orders_all(st)
+            complete = complete and ok
+            for r in rs:
+                if r.get("clientOrderId"):
+                    index[r["clientOrderId"]] = r
+                if r.get("orderId"):
+                    index.setdefault("#" + str(r["orderId"]), r)
+        except Exception as e:  # noqa: BLE001
+            log.error("주문 대사(%s) 조회 실패 — 이번 사이클 대사를 건너뛴다: %s", st, e)
+            return {}
+    out = collections.Counter()
+    for row_id, sym, side, coid, oid, old in rows:
+        r = index.get(coid) or (index.get("#" + str(oid)) if oid else None)
+        if r is None and oid and oid != coid:
+            try:                      # 목록에서 못 찾았지만 brokerId 가 있으면 상세 조회
+                r = toss.order(oid)
+            except Exception as e:  # noqa: BLE001
+                log.warning("%s 주문 상세 조회 실패: %s", sym, e)
+        if r is None:
+            if not complete:
+                out["UNKNOWN(목록 불완전)"] += 1
+                continue              # 못 읽은 페이지에 있을 수 있다 — 닫지 않는다
+            # 목록을 다 읽었는데도 없다 = 접수된 적이 없거나 조회 범위 밖이다.
+            # **취소로 단정하지 않는다.**
+            new = "UNKNOWN: 계좌 이력에서 찾지 못함 (조회 범위 밖일 수 있음)"
+            out["UNKNOWN(부재)"] += 1
+        else:
+            new = order_state(r)
+            out[new] += 1
+        # 상태가 그대로여도 체결 수량은 갱신한다 (부분 체결이 늘어날 수 있다).
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute("UPDATE orders SET status=?, filled_quantity=?, order_id=?, "
+                         "reconciled_at=? WHERE id=?",
+                         (new, filled_qty(r) if r else None,
+                          (r or {}).get("orderId") or oid, _now(), row_id))
+        if str(new).split(":")[0] != str(old).split(" ")[0].split(":")[0]:
+            lvl = log.info if new in ("FILLED", "CANCELED") else log.warning
+            lvl("대사 %s %s: %s → %s%s", side, sym, old, new,
+                f" (체결 {filled_qty(r):g})" if r else "")
+    log.info("주문 대사: %s", dict(out) or "대상 없음")
+    return dict(out)
 
 
 def log_hold_shadow(run_id, rows, holdings, entries, regime):
@@ -1597,6 +1722,10 @@ def run_cycle(dry_run=None, force=False):
         db_update_run(run_id, total_value=account["total_value"], cash=account["cash"])
         log.info("계좌: 현금 $%.2f 총자산 $%.2f 보유 %s", account["cash"],
                  account["total_value"], list(account["holdings"]))
+        try:      # 지난 사이클이 남긴 '접수' 를 실제 결말로 닫는다 (체결/취소/거절/UNKNOWN)
+            reconcile_orders(toss)
+        except Exception as e:  # noqa: BLE001
+            log.error("주문 대사 실패(주문 판단에는 영향 없음): %s", e)
         log_equity(account["total_value"],     # 변동성 타겟이 쓰는 일별 자산 이력
                    sum(h["market_value"] for h in account["holdings"].values()))
         if VOL_TARGET_PCT > 0 and _vol_target_cap(verbose=True) is None:
