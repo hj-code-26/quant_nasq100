@@ -443,4 +443,40 @@ at.MAX_HOLD_DAYS = 0
 assert "없음" in at.hold_rule()
 at.MAX_HOLD_DAYS, at.HOLD_EXTEND_TOP = 20, _old_extend
 
+# ---------- 만기 연장 섀도 (주문에 영향 없이 판정만 기록) ----------
+at.DB_PATH = _tmpdb
+at.initialize_db()
+at.HOLD_EXTEND_TOP, at.HOLD_EXTEND_SHADOW = 0, 2       # 실주문은 현행, 섀도만 상위 2위
+_h = {"AAPL": hold(1, 100, 100), "TSLA": hold(1, 100, 100)}
+at.log_hold_shadow(1, _rows, _h, {"AAPL": _ENTRY, "TSLA": _ENTRY}, "보통")
+with _sq.connect(_tmpdb) as _c:
+    _sh = {r[0]: r[1:] for r in _c.execute(
+        "SELECT symbol, rank, would_extend, at_expiry, live_extend_top FROM hold_shadow")}
+assert _sh["AAPL"] == (1, 1, 1, 0), _sh                # 1위 → 연장 판정, 실운영은 꺼짐
+# 순위는 **유니버스 전체** 기준이다 (미보유 ZZZZ 가 2위) — 시뮬의 '상위 N위' 와 같은 정의.
+# 보유 종목끼리만 매기면 보유가 적을 때 전부 연장돼 버린다.
+assert _sh["TSLA"] == (3, 0, 1, 0), _sh
+at.HOLD_EXTEND_SHADOW = 1
+at.log_hold_shadow(2, _rows, _h, {"AAPL": _ENTRY, "TSLA": _ENTRY}, "보통")
+with _sq.connect(_tmpdb) as _c:
+    _sh2 = {r[0]: r[1] for r in _c.execute(
+        "SELECT symbol, would_extend FROM hold_shadow WHERE run_id=2")}
+assert _sh2 == {"AAPL": 1, "TSLA": 0}, _sh2            # 상위 1위만 연장
+
+# 섀도는 주문을 만들지 않는다 — 같은 상태에서 실제 주문은 여전히 전량 만기 청산
+_o, _ = at.validate_orders({"orders": [], "summary": ""}, {}, acct(0, _h), REGULAR,
+                           {"AAPL": _ENTRY, "TSLA": _ENTRY})
+assert sorted(o["symbol"] for o in _o) == ["AAPL", "TSLA"], _o
+
+# 순위 정의가 extendable 과 같은가 (두 곳이 갈리면 섀도가 거짓말이 된다)
+at.HOLD_EXTEND_TOP = 2
+assert at.extendable(_rows, _h, "보통") == {
+    s for s, r in at.hold_ranks(_rows, "보통").items() if 0 < r <= 2} & set(_h)
+at.HOLD_EXTEND_SHADOW = 0                              # 꺼짐 → 기록 없음
+at.log_hold_shadow(3, _rows, _h, {"AAPL": _ENTRY}, "보통")
+with _sq.connect(_tmpdb) as _c:
+    assert _c.execute("SELECT COUNT(*) FROM hold_shadow WHERE run_id=3").fetchone()[0] == 0
+at.HOLD_EXTEND_TOP, at.HOLD_EXTEND_SHADOW = _old_extend, 20
+at.DB_PATH = _old_db
+
 print("validate_orders OK")

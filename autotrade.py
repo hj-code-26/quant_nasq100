@@ -84,6 +84,9 @@ BEAR_RET60_PCT = float(os.environ.get("BEAR_RET60_PCT", -3))   # 60일 수익률
 # 만기 도달 종목이 오늘 선별 상위 N위 안이면 팔지 않고 다음 사이클에 또 본다. 0 이면 끔(현행).
 # 근거·한계는 research/exit_condition.md. 사전등록 채택 기준(DSR≥0.95)은 **통과하지 못했다.**
 HOLD_EXTEND_TOP = int(os.environ.get("HOLD_EXTEND_TOP", 0))
+# 주문에는 영향 없이 "연장 규칙이었다면" 을 기록만 한다. 0 이면 기록도 끔.
+# 켜져 있는 HOLD_EXTEND_TOP 과 무관하게 이 N 으로 판정해 hold_shadow 에 남긴다.
+HOLD_EXTEND_SHADOW = int(os.environ.get("HOLD_EXTEND_SHADOW", 20))
 # 변동성 타겟: 계좌 일별 수익률의 실현 변동성이 목표를 넘으면 주식 노출을 줄인다 (0 이면 끔).
 # 신규 매수만 조이는 방식은 슬롯이 늘 차 있어 아무 효과가 없었다 — 보유분을 줄여야 작동한다.
 VOL_TARGET_PCT = float(os.environ.get("VOL_TARGET_PCT", 30))
@@ -157,7 +160,14 @@ def initialize_db():
             side TEXT, quantity REAL, amount_usd REAL, price REAL, order_id TEXT,
             status TEXT, reason TEXT);
         CREATE TABLE IF NOT EXISTS equity (
-            date TEXT PRIMARY KEY, total_value REAL, timestamp TEXT);""")
+            date TEXT PRIMARY KEY, total_value REAL, timestamp TEXT);
+        -- 만기 연장 규칙 섀도. 주문에 영향 없음 — 켜기 전에 실계좌 판정을 모으는 용도.
+        CREATE TABLE IF NOT EXISTS hold_shadow (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER, timestamp TEXT,
+            symbol TEXT, regime TEXT, held_days INTEGER, rank INTEGER, extend_top INTEGER,
+            would_extend INTEGER, at_expiry INTEGER, live_extend_top INTEGER,
+            price REAL, ret_20d_pct REAL, atr_pct REAL);
+        CREATE INDEX IF NOT EXISTS ix_hold_shadow ON hold_shadow(symbol, timestamp);""")
         ecols = [r[1] for r in conn.execute("PRAGMA table_info(equity)")]
         for col, typ in (("stock_value", "REAL"), ("cashflow", "REAL")):
             if col not in ecols:
@@ -835,10 +845,21 @@ def extendable(rows, holdings, regime="보통"):
     평상시에는 진입과 같은 조건(20일 수익률 > 0)을 함께 건다. 하락 국면은 저변동성으로 고르므로
     모멘텀 부호를 보지 않는다 (momentum_tier 와 같은 규칙).
     """
-    if HOLD_EXTEND_TOP <= 0 or not rows:
+    if HOLD_EXTEND_TOP <= 0:
         return set()
-    top = [r for r in rows if regime == "하락" or (r.get("ret_20d_pct") or 0) > 0]
-    return {r["symbol"] for r in top[:HOLD_EXTEND_TOP]} & set(holdings)
+    ranks = hold_ranks(rows, regime)
+    return {s for s in holdings if 0 < ranks.get(s, 0) <= HOLD_EXTEND_TOP}
+
+
+def hold_ranks(rows, regime="보통"):
+    """{종목: 진입 자격 순위(1부터)}. 자격이 없으면 0.
+
+    extendable 과 섀도 기록이 **같은 정의**를 쓰게 한 곳에 둔다.
+    자격 = screen() 정렬 순서 + (평상시) 진입과 같은 20일 수익률 > 0 조건.
+    """
+    ok = [r for r in (rows or []) if regime == "하락" or (r.get("ret_20d_pct") or 0) > 0]
+    ranks = {r["symbol"]: i + 1 for i, r in enumerate(ok)}
+    return {r["symbol"]: ranks.get(r["symbol"], 0) for r in (rows or [])}
 
 
 def pick_candidates(rows, account, regime="보통"):
@@ -1286,6 +1307,36 @@ def place_all(toss, run_id, orders, dry, tag=""):
                          " WHERE id=?", [*fields.values(), row_id])
 
 
+def log_hold_shadow(run_id, rows, holdings, entries, regime):
+    """주문과 무관하게 "연장 규칙이었다면" 을 매 사이클 남긴다 (보유 종목만, 사이클당 <=10행).
+
+    HOLD_EXTEND_TOP 을 켜기 전에 실계좌에서 판정을 모으기 위한 것이다. 순위가 보유 기간 동안
+    어떻게 변하는지까지 남으므로, 만기 도달 시점의 한 줄만이 아니라 경로를 볼 수 있다.
+    사후 분석은 research/hold_shadow_report.py.
+    """
+    if HOLD_EXTEND_SHADOW <= 0 or not rows:
+        return
+    ranks = hold_ranks(rows, regime)
+    ts = _now()
+    for sym, h in holdings.items():
+        held = trading_days_since((entries or {}).get(sym))
+        rank = ranks.get(sym, 0)
+        db_insert("hold_shadow", {
+            "run_id": run_id, "timestamp": ts, "symbol": sym, "regime": regime,
+            "held_days": held, "rank": rank, "extend_top": HOLD_EXTEND_SHADOW,
+            "would_extend": int(0 < rank <= HOLD_EXTEND_SHADOW),
+            "at_expiry": int(MAX_HOLD_DAYS > 0 and held is not None and held >= MAX_HOLD_DAYS),
+            "live_extend_top": HOLD_EXTEND_TOP, "price": h.get("last_price"),
+            "ret_20d_pct": next((r.get("ret_20d_pct") for r in rows if r["symbol"] == sym), None),
+            "atr_pct": next((r.get("atr_pct") for r in rows if r["symbol"] == sym), None)})
+    at_exp = [s for s, h in holdings.items()
+              if MAX_HOLD_DAYS > 0 and (trading_days_since((entries or {}).get(s)) or 0) >= MAX_HOLD_DAYS]
+    if at_exp:
+        log.info("만기 섀도(상위 %d 기준, 주문 영향 없음): %s", HOLD_EXTEND_SHADOW,
+                 {s: ("연장" if 0 < ranks.get(s, 0) <= HOLD_EXTEND_SHADOW
+                      else f"청산(순위 {ranks.get(s, 0) or '자격없음'})") for s in at_exp})
+
+
 def log_funnel(rows, picks, decisions, plan, risk_orders, orders, skipped, account):
     """의사결정 퍼널 한 줄 + 차단 사유 집계. **주문이 0건이어도 반드시 남긴다.**
 
@@ -1385,6 +1436,8 @@ def run_cycle(dry_run=None, force=False):
         extend_ok = extendable(rows, account["holdings"], regime)
         if HOLD_EXTEND_TOP and extend_ok:
             log.info("만기 연장 후보(선별 상위 %d위 안 보유): %s", HOLD_EXTEND_TOP, sorted(extend_ok))
+
+        log_hold_shadow(run_id, rows, account["holdings"], entries, regime)
 
         # 0-1) ★ 위험 관리 먼저. 손절·만기·노출 축소는 LLM 판단이 실패하거나
         #      느려도 반드시 나가야 한다 — 그래서 LLM 호출 전에, LLM 없이 돌린다.
