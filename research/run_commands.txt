@@ -113,3 +113,7 @@ python research/exit_condition.py
 # 현금을 만들려면 무엇을 얼마나 팔아야 하나 (산수 + 시스템 규칙. 투자 판단 아님)
 python research/cash_raise.py
 #   → research/out/cash_raise.csv
+
+# 모멘텀 음전 → 양전 빈도 (과거 빈도, 예측 아님)
+python research/mom_flip.py
+#   → research/out/mom_flip.csv · 보고서 research/mom_flip.md
