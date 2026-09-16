@@ -262,6 +262,15 @@ def main():
     ap.add_argument("--no-save", action="store_true")
     a = ap.parse_args()
 
+    # autotrade 를 import 하면 logging.FileHandler 가 autotrade.log 를 연다. 이 핸들러는
+    # builtins.open 가드를 거치지 않으므로, 기록이 생기기 전에 떼어 낸다 (운영 로그 무오염).
+    import logging
+    import autotrade  # noqa: F401
+    for h in list(logging.getLogger().handlers):
+        if isinstance(h, logging.FileHandler):
+            logging.getLogger().removeHandler(h)
+            h.close()
+
     if a.selftest:
         snap = collect_fake()
     elif a.replay:
