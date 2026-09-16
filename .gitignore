@@ -29,3 +29,6 @@ backend/
 # 실행 로그 (컴퓨터마다 따로 쌓이므로 추적하지 않는다)
 autotrade.log
 .env.bak*
+
+# 실계좌 진입일 프로브 산출물 (계좌 보유·주문 내역 — 추적하지 않는다)
+research/out/entry_probe_*
