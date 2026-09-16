@@ -109,3 +109,7 @@ python research/exit_condition.py
 #   → research/out/exit_condition_scorecard.csv 사전등록 채택 기준 전체 (누적 시도 N=50)
 #   보고서: research/exit_condition.md
 #   exit_study.sim opt-in 추가: cfg["extend_daily"] — 연장 시 보유 시계를 리셋하지 않는다(운영 형태)
+
+# 현금을 만들려면 무엇을 얼마나 팔아야 하나 (산수 + 시스템 규칙. 투자 판단 아님)
+python research/cash_raise.py
+#   → research/out/cash_raise.csv
