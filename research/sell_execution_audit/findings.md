@@ -3,13 +3,13 @@
 기준 커밋: `6a0d843` (= 원래 분석 기준 = 수정 직전 기준). 수정본: 이 브랜치 HEAD.
 
 ```bash
-python research/sell_execution_audit/scenarios.py    # 53 시나리오, 가짜 브로커·가짜 시계
+python research/sell_execution_audit/scenarios.py    # 55 시나리오, 가짜 브로커·가짜 시계
 python research/sell_execution_audit/ab_verify.py    # 같은 파일을 6a0d843 과 HEAD 에서 각각 실행해 비교
 ```
 둘 다 `research.isolation.guard()` 아래에서 돈다 — 자격증명 제거, 운영 DB·로그 쓰기 차단,
 토스 호스트 차단. `ab_verify.py` 는 끝에 운영 파일 해시를 다시 확인한다.
 
-**A/B 결과 (2026-09-16): 수정으로 통과 전환 24 · 원래도 통과 29 · 여전히 실패 0 · 회귀 0.**
+**A/B 결과 (2026-09-16): 수정으로 통과 전환 24 · 원래도 통과 31 · 여전히 실패 0 · 회귀 0.**
 
 ## 1. 운영 증거로 확인된 것
 

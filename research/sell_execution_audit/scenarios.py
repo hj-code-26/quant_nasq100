@@ -938,6 +938,41 @@ def _i5():
     return "COALESCE(cashflow,0) — NULL(미기재)과 0(입출금 없음)이 같은 값이 된다"
 
 
+# ═══════ K. "하락 국면이면 대체 후보가 항상 있다" 를 실제 조건으로 확인 ═══════
+# (전략 채택 여부가 아니라 **분기 조건**을 확인하는 것이다. MOMENTUM_EXIT 는
+#  시나리오 안에서만 켰다가 되돌린다 — 운영 설정은 건드리지 않는다.)
+@scenario("K1", "하락 국면 momentum_tier 는 부호와 무관하게 1.0", "K")
+def _k1():
+    assert at.momentum_tier(-30, "하락") == (1.0, "하락 국면(저변동성 선별 — 모멘텀 무관)"),         at.momentum_tier(-30, "하락")
+    assert at.momentum_tier(-30, "보통")[0] == 0.0, at.momentum_tier(-30, "보통")
+    return "하락=1.0 / 보통=0.0 — 하락 국면에선 음수 모멘텀도 size_factor>0 이 된다"
+
+
+@scenario("K2", "rotate_to 는 '미보유 + size_factor>0 인 판단' 이 있을 때만 찬다", "K")
+def _k2():
+    old = at.MOMENTUM_EXIT
+    at.MOMENTUM_EXIT = True
+    try:
+        a = acct(100, {"AAPL": hold(10, 100, 105)})
+        d_held_only = {"AAPL": dec("AAPL", "hold", 105, -2, a)}
+        n0 = len(at.forced_exits(d_held_only, a))
+        # 하락 국면 후보(미보유) 하나 추가 — 모멘텀이 음수여도 size_factor 1.0
+        f, tier = at.momentum_tier(-8, "하락")
+        d2 = dict(d_held_only)
+        d2["NEW"] = {"symbol": "NEW", "decision": "hold", "percentage": 0, "reason": "t",
+                     "status": {"current_price": 50, "stock_balance": 0.0,
+                                "avg_buy_price": 0.0, "pnl_pct": None,
+                                "ret_20d_pct": -8, "momentum_tier": tier, "size_factor": f}}
+        n1 = len(at.forced_exits(d2, a))
+        n_risk = len(at.forced_exits({}, a))          # 위험관리 패스는 decisions={}
+        assert (n0, n1, n_risk) == (0, 1, 0), (n0, n1, n_risk)
+        return ("보유만 판단 → 0건 · 미보유 후보 1개 추가 → 1건 · "
+                "위험관리 패스(decisions={}) → 0건. "
+                "'하락장이면 항상 발동'이 아니라 '후보 판단이 있는 본 패스에서만' 이다")
+    finally:
+        at.MOMENTUM_EXIT = old
+
+
 # ────────────────────────────── 실행 ──────────────────────────────
 def run_all():
     out = []
