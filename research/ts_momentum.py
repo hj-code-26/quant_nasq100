@@ -80,16 +80,27 @@ def ts_sim(P, cfg):
         if (t - 1 - phase) % every == 0:
             V = cash + pos.sum()
             ok = valid[u] & np.isfinite(ret[t])            # 오늘 체결 가능한 구성종목
+            cap = cfg.get("cap")                           # mcap_momentum: 전일 시총 가중 · 상위 top 개
+            if cap is not None:
+                ok &= np.isfinite(cap[u])
+                if cfg.get("top") and ok.sum() > cfg["top"]:
+                    cut = np.sort(cap[u][ok])[-cfg["top"]]
+                    ok &= cap[u] >= cut
             base = np.zeros(m)
             if ok.any():
-                if cfg.get("invvol"):
+                if cap is not None:
+                    base = np.where(ok, cap[u], 0.0) / cap[u][ok].sum()
+                elif cfg.get("invvol"):
                     iv = np.where(ok, 1 / np.maximum(-F["lowvol"][u], 1e-6), 0.0)
                     iv = np.where(np.isfinite(iv), iv, 0.0)
                     base = iv / iv.sum()
                 else:
                     base = ok / ok.sum()
             on = ok if always else ok & (np.nan_to_num(F[sig][u], nan=-1.0) > 0)
-            tgt = np.where(on, base, 0.0) * V
+            tgt = np.where(on, base, 0.0)
+            if cfg.get("redistribute") and tgt.sum() > 0:  # 꺼진 몫을 켜진 종목에 비례 재배분 (전부 꺼지면 현금)
+                tgt = tgt / tgt.sum()
+            tgt = tgt * V
             if cfg.get("bear") and R["live_bear"][u]:
                 tgt *= cfg["bear"]
             d = tgt - pos
