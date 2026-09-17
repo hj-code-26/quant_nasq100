@@ -13,6 +13,7 @@ at.CASH_RESERVE_PCT = 10
 at.MIN_ORDER_USD = 5
 at.STOP_LOSS_PCT = 15
 at.MOMENTUM_EXIT = True
+at.RESERVE_RESTORE = 0          # 유지선 복원은 전용 블록에서만 켠다 (.env 에 켜져 있어도)
 
 NOW = datetime.datetime.now(at.KST)
 REGULAR = (NOW - datetime.timedelta(hours=1), NOW - datetime.timedelta(hours=1),

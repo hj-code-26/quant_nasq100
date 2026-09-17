@@ -46,7 +46,8 @@ GATEWAY = "api.anthropic.com" not in BASE_URL             # OmniRoute 등 게이
 DRY_RUN = os.environ.get("DRY_RUN", "1") == "1"           # 기본은 모의. 실주문은 DRY_RUN=0
 # 실행 시각 (KST): 프리장 개장 17:00 → 정규장 개장 22:30 → 1시간 뒤 23:30 → 00:00 부터 2시간 간격
 # → 정규장 마감(05:00) 뒤 애프터장 06:00·08:00.
-# 겨울(서머타임 해제)엔 한 시간씩 밀려서 앞선 실행은 "장 시작 전", 마지막은 "장 마감 후"로 자동 건너뛴다.
+# 겨울(서머타임 해제)엔 한 시간씩 밀려서 앞선 실행은 "장 시작 전", 마지막은 "장 마감 후"가 되는데,
+# 그때는 건너뛰지 않고 주문 없는 사전 분석으로 돈다 (cycle_mode). 휴장일만 건너뛴다.
 TRADE_TIMES = [t.strip() for t in
                os.environ.get("TRADE_TIMES",
                               "17:00,22:30,23:30,00:00,02:00,04:00,06:00,08:00").split(",")]
@@ -740,6 +741,20 @@ def session_block(session):
     if now > session[-1]:
         return f"장 마감 후 (마감 {session[-1]:%H:%M} KST)"
     return None
+
+
+def cycle_mode(session, force=False):
+    """이번 사이클을 어떻게 돌릴지 → ("trade" | "analysis" | "skip", 사유).
+
+    장 시작 전·마감 후는 건너뛰지 않고 **주문 없는 사전 분석**으로 돌린다 — 무엇을 살지·팔지를
+    미리 로그·DB 에 남겨 둔다. 휴장일은 계속 건너뛴다(거래일이 아니면 분석할 시세가 없고 Claude 호출만 쓴다).
+    force 는 수동 1회 실행용 — 장 시간 밖에서도 실주문 경로를 허용한다(휴장일 제외)."""
+    why = session_block(session)
+    if not why:
+        return "trade", None
+    if not session:
+        return "skip", why
+    return ("trade", None) if force else ("analysis", why)
 
 
 # ---------- Claude 토큰 집계 ----------
@@ -1752,11 +1767,16 @@ def run_cycle(dry_run=None, force=False):
     try:
         toss = shared_client()
         session = market_session(toss)
-        why = session_block(session)
-        if why and not (force and session):
-            log.info("%s — 건너뜀 (강제 실행은 --force 또는 대시보드 1회 실행)", why)
+        mode, why = cycle_mode(session, force)
+        if mode == "skip":
+            log.info("%s — 건너뜀", why)
             db_update_run(run_id, status="skipped", summary=why)
             return
+        if mode == "analysis" and not dry:
+            dry = True                      # ★ 장 밖에서는 절대 주문하지 않는다 — 분석만
+            db_update_run(run_id, dry_run=1)
+        if mode == "analysis":
+            log.info("%s — 주문 없이 사전 분석으로 실행 (실주문은 --force 또는 대시보드 1회 실행)", why)
         account = account_state(toss)
         db_update_run(run_id, total_value=account["total_value"], cash=account["cash"])
         log.info("계좌: 현금 $%.2f 총자산 $%.2f 보유 %s", account["cash"],

@@ -33,6 +33,17 @@ with at(9, 30, day=1):                 # 애프터장 마감 후
     assert a.session_block(sess).startswith("장 마감 후")
 assert a.session_block(None) == "휴장일"
 
+# 사이클 모드: 장 밖은 건너뛰지 않고 주문 없는 사전 분석, 휴장일만 건너뜀
+with at(16, 30):                       # 장 시작 전 → 분석
+    assert a.cycle_mode(sess)[0] == "analysis"
+    assert a.cycle_mode(sess, force=True) == ("trade", None)       # 수동 강제 실행은 그대로
+with at(23):                           # 장중 → 매매
+    assert a.cycle_mode(sess) == ("trade", None)
+with at(9, 30, day=1):                 # 장 마감 후 → 분석
+    assert a.cycle_mode(sess)[0] == "analysis"
+assert a.cycle_mode(None) == ("skip", "휴장일")
+assert a.cycle_mode(None, force=True) == ("skip", "휴장일")        # 강제여도 휴장일은 건너뜀
+
 # 사전 분석 창: 정규장 개장(22:30) 전 60분 안에서만 연다.
 with at(22, 0):                        # 개장 30분 전 → 열림
     assert round(a.analysis_lead_min(sess)) == 30
