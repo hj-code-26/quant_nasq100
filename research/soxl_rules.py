@@ -80,13 +80,14 @@ def indicators(px):
     dn = (-d.clip(upper=0)).ewm(alpha=1 / 14, adjust=False).mean()
     out = pd.DataFrame(index=px.index)
     out["rsi"] = 100 - 100 / (1 + up / dn)
-    out["ma20"], out["ma200"] = c.rolling(20).mean(), c.rolling(200).mean()
+    out["ma20"], out["ma50"], out["ma200"] = c.rolling(20).mean(), c.rolling(50).mean(), c.rolling(200).mean()
     out["hi252"] = c.rolling(252, min_periods=1).max()
     has_ohlc = px["open"].notna().all()
     bull = (c > px["open"]) if has_ohlc else (c > c.shift(1))
     low = px["low"] if has_ohlc else c
     out["touch200"] = (low <= out["ma200"]) & bull & (c > out["ma200"])
     out["xdown20"] = (c.shift(1) >= out["ma20"].shift(1)) & (c < out["ma20"])
+    out["xdown50"] = (c.shift(1) >= out["ma50"].shift(1)) & (c < out["ma50"])
     return out
 
 
@@ -95,7 +96,11 @@ def sim(px, cfg):
     ind = indicators(px)
     c, rf = px["close"].to_numpy(float), px["rf"].to_numpy(float)
     rsi, ma200 = ind["rsi"].to_numpy(), ind["ma200"].to_numpy()
-    touch, xdown = ind["touch200"].to_numpy(), ind["xdown20"].to_numpy()
+    touch = ind["touch200"].to_numpy()
+    xdown = ind["xdown50" if cfg.get("exit_ma") == 50 else "xdown20"].to_numpy()
+    dd_lim = cfg.get("dd", -0.30)                      # v2 A2: 관망 기준 완화
+    quarter, trend = cfg.get("quarter", False), cfg.get("trend", False)
+    target, band, dyn = cfg.get("target", 0.20), cfg.get("band", 0.10), cfg.get("dyn", False)
     hi252 = ind["hi252"].to_numpy()
     n = len(c)
     mod, risk = cfg["module"], cfg.get("risk")          # risk: None | "price" | "account"
@@ -140,9 +145,9 @@ def sim(px, cfg):
         # 오늘 체결: 어제 신호의 주문 (낙폭 관망은 체결일 기준으로 다시 본다)
         dd_blocked = False
         if risk == "price":
-            dd_blocked = c[i] / hi252[i] - 1 <= -0.30
+            dd_blocked = c[i] / hi252[i] - 1 <= dd_lim
         elif risk == "account":
-            dd_blocked = V / peak - 1 <= -0.30
+            dd_blocked = V / peak - 1 <= dd_lim
         todo, pending = pending, []
         for side, x in todo:
             if side == "sell":
@@ -160,6 +165,9 @@ def sim(px, cfg):
                 unit, spent = seed / 40, 0.0
                 if not dd_blocked:
                     spent += buy(unit, i)
+            elif qty > 0 and quarter and spent >= seed - 1e-9 and c[i] < cost / qty:
+                sell(0.25, i)                           # v2 A1 쿼터손절: 소진 후 손실이면 1/4 매도, 10회분 재사용
+                spent -= 10 * unit
             elif qty > 0 and spent < seed - 1e-9 and not dd_blocked:
                 avg = cost / qty
                 for lim in (avg, c[i - 1]):             # LOC: 한도는 어제까지 정보, 체결은 오늘 종가
@@ -176,15 +184,16 @@ def sim(px, cfg):
             if tranche_left > 0:
                 pending.append(("buy", tranche_amt))
                 tranche_left -= 1
-            elif (rsi[i] <= 30 or touch[i]) and not xdown[i]:
+            elif ((rsi[i] <= 30 and (not trend or c[i] > ma200[i])) or touch[i]) and not xdown[i]:
                 tranche_amt, tranche_left = cash * 0.60 / 4, 3
                 pending.append(("buy", tranche_amt))
         elif mod == "M3":
             wt = qty * c[i] / V
-            if wt < 0.10:
-                pending.append(("buy", 0.20 * V - qty * c[i]))
-            elif wt > 0.30:
-                pending.append(("sell", 1 - 0.20 / wt))
+            tg = (0.30 if c[i] > ma200[i] else 0.10) if dyn and not np.isnan(ma200[i]) else target
+            if wt < tg - band:
+                pending.append(("buy", tg * V - qty * c[i]))
+            elif wt > tg + band:
+                pending.append(("sell", 1 - tg / wt))
         # R3: 포지션 나이 63거래일 → 50% 축소 (포지션당 1회)
         if qty > 0:
             age += 1
@@ -216,9 +225,9 @@ GRID = {f"{m} · {rl}": {"module": m, "risk": rk}
         for rl, rk in (("리스크 끔", None), ("R1+R2p+R3", "price"), ("R1+R2a+R3", "account"))}
 
 
-def check(act):
+def check(act, grid=None):
     cut = act.iloc[:-250]
-    for name, cfg in GRID.items():
+    for name, cfg in (grid or GRID).items():
         a, _, _ = sim(act, cfg)
         b, _, _ = sim(cut, cfg)
         gap = float((a.loc[b.index] - b).abs().max())
@@ -229,9 +238,10 @@ def check(act):
     return True
 
 
-def main():
+def main(grid=None, tag="soxl_rules", title="SOXL 규칙 백테스트 (사전등록, 누적 N=92)"):
+    GRID = grid or globals()["GRID"]
     act, syn, bench = load()
-    check(act)
+    check(act, GRID)
     print("불변식 (a) prefix 9설정 · (b) 현금 = 단기금리 복리 · (c) 현금·수량 음수 없음 — 통과")
     if "--check" in sys.argv:
         return
@@ -259,7 +269,7 @@ def main():
                          "연 매매": round(info["trades"] / yrs, 1), "익절 사이클": info["cycles"] if cfg["module"] == "M1" else None})
         rows.append({"구간": pname, "설정": "(현금 CAGR 기준)", "CAGR%": cash_cagr})
     tb = pd.DataFrame(rows)
-    tb.to_csv(ROOT / "research" / "out" / "soxl_rules.csv", index=False, encoding="utf-8-sig")
+    tb.to_csv(ROOT / "research" / "out" / f"{tag}.csv", index=False, encoding="utf-8-sig")
 
     def get(p, s, col):
         return tb[(tb["구간"] == p) & (tb["설정"] == s)][col].iloc[0]
@@ -277,12 +287,12 @@ def main():
     yr = pd.DataFrame({n: (curves[("실제 2010~2026", n)].resample("YE").last().pct_change() * 100).round(0)
                        for n in GRID})
     yr.index = yr.index.year
-    md = ["# SOXL 규칙 백테스트 (사전등록, 누적 N=92)",
+    md = [f"# {title}",
           "## 성과\n\n" + tb.to_string(index=False),
           "## 사전등록 판정\n\n" + vt.to_string(index=False),
           "## 연도별 수익률 % (실제 2010~2026)\n\n" + yr.to_string()]
     text = "\n\n".join(md)
-    (ROOT / "research" / "soxl_rules.md").write_text(text, encoding="utf-8")
+    (ROOT / "research" / f"{tag}.md").write_text(text, encoding="utf-8")
     print(text)
 
 
