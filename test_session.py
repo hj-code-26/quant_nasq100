@@ -44,6 +44,26 @@ with at(9, 30, day=1):                 # 장 마감 후 → 분석
 assert a.cycle_mode(None) == ("skip", "휴장일")
 assert a.cycle_mode(None, force=True) == ("skip", "휴장일")        # 강제여도 휴장일은 건너뜀
 
+# 실전 예측의 기준일·목표일: 예측 시각 직전에 끝난 정규장 → 그다음 거래일
+_d = datetime.date
+_sess = [_d(2026, 9, 10), _d(2026, 9, 11), _d(2026, 9, 14)]          # 목·금·월 (주말 건너뜀)
+_ny = lambda *x: datetime.datetime(*x, tzinfo=a.NY)
+assert a.prediction_window(_ny(2026, 9, 11, 10, 0), _sess) == (_d(2026, 9, 10), _d(2026, 9, 11))   # 장중 → 어제 종가 기준
+assert a.prediction_window(_ny(2026, 9, 11, 16, 30), _sess) == (_d(2026, 9, 11), _d(2026, 9, 14))  # 장 마감 후 → 오늘 기준, 다음은 월요일
+assert a.prediction_window(_ny(2026, 9, 14, 17, 0), _sess) == (_d(2026, 9, 14), None)            # 목표일 아직 없음
+assert a.prediction_window(_ny(2026, 9, 9, 12, 0), _sess) == (None, None)
+
+# 성적표: 같은 종목·기준일의 여러 예측은 마지막만 센다, 표본이 적으면 판정 보류
+import pandas as _pd
+_df = _pd.DataFrame([
+    {"made_at": "2026-09-11T10:00", "symbol": "A", "base_date": "2026-09-10", "up_prob": 30, "pct": -2, "actual_pct": 1.0},
+    {"made_at": "2026-09-11T14:00", "symbol": "A", "base_date": "2026-09-10", "up_prob": 70, "pct": 0.5, "actual_pct": 1.0},
+    {"made_at": "2026-09-11T14:00", "symbol": "B", "base_date": "2026-09-10", "up_prob": 65, "pct": 1.0, "actual_pct": -0.5},
+    {"made_at": "2026-09-11T14:00", "symbol": "C", "base_date": "2026-09-10", "up_prob": 35, "pct": -3, "actual_pct": None}])
+_s = a.prediction_stats(_df)
+assert _s["채점 건수"] == 2 and _s["상승 확답(≥60) 건수"] == 2 and _s["상승 확답 적중 %"] == 50.0, _s
+assert _s["실제 ≥ 보수적 % 비율"] == 50.0 and _s["판정"].startswith("표본 부족"), _s
+
 # 사전 분석 창: 정규장 개장(22:30) 전 60분 안에서만 연다.
 with at(22, 0):                        # 개장 30분 전 → 열림
     assert round(a.analysis_lead_min(sess)) == 30

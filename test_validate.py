@@ -254,9 +254,17 @@ assert bad({"orders": [{"symbol": "A", "side": "sell", "sell_pct": float("nan"),
 assert bad({"orders": [{"symbol": "A", "side": "sell", "sell_pct": 250, "reason": "x"}],
             "summary": ""})                                                    # 범위 밖
 assert bad({"orders": [{"symbol": 7, "side": "sell", "reason": "x"}], "summary": ""})
-assert bad({"decision": "buy", "percentage": "80", "reason": "x"})             # 문자열 숫자
-assert bad({"decision": "buy", "percentage": 80.5, "reason": "x"})             # 정수 아님
-assert at.check_schema({"decision": "hold", "percentage": 0, "reason": "x"}, at.DECISION_SCHEMA)
+assert bad({"decision": "buy", "percentage": "80", "reason": "x", "next_day_up_prob": 50, "next_day_pct": -1})  # 문자열 숫자
+assert bad({"decision": "buy", "percentage": 80.5, "reason": "x", "next_day_up_prob": 50, "next_day_pct": -1})  # 정수 아님
+assert at.check_schema({"decision": "hold", "percentage": 0, "reason": "x", "next_day_up_prob": 50,
+                        "next_day_pct": -1.5}, at.DECISION_SCHEMA)
+for _p in ({"decision": "hold", "percentage": 0, "reason": "x"},                                  # 예측 필드 누락
+           {"decision": "hold", "percentage": 0, "reason": "x", "next_day_up_prob": 130, "next_day_pct": 0}):  # 확률 범위 밖
+    try:
+        at.check_schema(_p, at.DECISION_SCHEMA)
+        raise AssertionError(f"종목 판단 스키마가 통과시키면 안 된다: {_p}")
+    except ValueError:
+        pass
 
 # --- P1: 만기 계산은 실제 거래일 달력을 쓴다 (공휴일 무시하면 일찍 청산된다) ---
 _today = _dt.datetime.now(at.NY).date()

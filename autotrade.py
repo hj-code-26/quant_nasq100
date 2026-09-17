@@ -206,8 +206,12 @@ DECISION_SCHEMA = {
     "properties": {
         "decision": {"type": "string", "enum": ["buy", "sell", "hold"]},
         "percentage": {"type": "integer", "minimum": 0, "maximum": 100},
-        "reason": {"type": "string"}},
-    "required": ["decision", "percentage", "reason"], "additionalProperties": False}
+        "reason": {"type": "string"},
+        # 실전 예측 기록 (주문에는 쓰지 않는다) — 다음 거래일 종가 기준
+        "next_day_up_prob": {"type": "integer", "minimum": 0, "maximum": 100},
+        "next_day_pct": {"type": "number", "minimum": -50, "maximum": 50}},
+    "required": ["decision", "percentage", "reason", "next_day_up_prob", "next_day_pct"],
+    "additionalProperties": False}
 ALLOCATION_SCHEMA = {   # 매수 금액은 Claude 가 아니라 코드가 정한다 (모멘텀 구간 × 한도)
     "type": "object",
     "properties": {
@@ -246,7 +250,15 @@ def initialize_db():
             symbol TEXT, regime TEXT, held_days INTEGER, rank INTEGER, extend_top INTEGER,
             would_extend INTEGER, at_expiry INTEGER, live_extend_top INTEGER,
             price REAL, ret_20d_pct REAL, atr_pct REAL);
-        CREATE INDEX IF NOT EXISTS ix_hold_shadow ON hold_shadow(symbol, timestamp);""")
+        CREATE INDEX IF NOT EXISTS ix_hold_shadow ON hold_shadow(symbol, timestamp);
+        -- 실전 예측 기록: '다음 거래일 종가' 방향·보수적 % 를 미리 적고 결과로 채점한다 (미래 참조 불가능한 검증).
+        -- base_date = 예측 시각 직전에 끝난 정규장, target_date = 그다음 거래일. 주문에 영향 없음.
+        CREATE TABLE IF NOT EXISTS predictions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER, made_at TEXT, source TEXT,
+            symbol TEXT, up_prob REAL, pct REAL, dry_run INTEGER,
+            base_date TEXT, target_date TEXT, base_close REAL, target_close REAL,
+            actual_pct REAL, scored_at TEXT);
+        CREATE INDEX IF NOT EXISTS ix_predictions ON predictions(scored_at, symbol);""")
         ecols = [r[1] for r in conn.execute("PRAGMA table_info(equity)")]
         for col, typ in (("stock_value", "REAL"), ("cashflow", "REAL")):
             if col not in ecols:
@@ -549,6 +561,80 @@ def trading_days_since(ts, calendar=None):
         if cur.weekday() < 5:
             days += 1
     return days
+
+
+# ---------- 실전 예측 기록 · 채점 ----------
+def prediction_window(made_at, sessions):
+    """예측 시각 → (기준일, 목표일). sessions 는 정규장 날짜(뉴욕) 오름차순.
+    기준일 = 16:00(뉴욕)이 예측 시각 이전인 마지막 거래일, 목표일 = 그다음 거래일. 모르면 None."""
+    t = made_at.astimezone(NY)
+    done = [d for d in sessions if datetime.datetime.combine(d, datetime.time(16), NY) <= t]
+    if not done:
+        return None, None
+    later = [d for d in sessions if d > done[-1]]
+    return done[-1], (later[0] if later else None)
+
+
+def log_predictions(run_id, decisions, dry, source="claude"):
+    rows = [(run_id, _now(), source, s, d.get("next_day_up_prob"), d.get("next_day_pct"), int(dry))
+            for s, d in decisions.items() if d.get("next_day_up_prob") is not None]
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.executemany("INSERT INTO predictions (run_id, made_at, source, symbol, up_prob, pct, dry_run) "
+                         "VALUES (?,?,?,?,?,?,?)", rows)
+    log.info("예측 기록 %d건: %s", len(rows),
+             {s: f"{d['next_day_up_prob']}%/{d['next_day_pct']:+.1f}%" for s, d in decisions.items()
+              if d.get("next_day_up_prob") is not None})
+
+
+def score_predictions(toss):
+    """채점 안 된 예측을 토스 일봉 종가로 채점한다. 목표일 장이 끝나지 않았으면 두고 넘어간다."""
+    with sqlite3.connect(DB_PATH) as conn:
+        todo = conn.execute("SELECT id, symbol, made_at FROM predictions WHERE scored_at IS NULL").fetchall()
+    if not todo:
+        return 0
+    now, done = datetime.datetime.now(NY), []
+    for sym in sorted({r[1] for r in todo}):
+        try:
+            df = candles(toss, sym, "1d", 30)
+        except Exception as e:  # noqa: BLE001
+            log.warning("예측 채점 %s 일봉 실패: %s", sym, e)
+            continue
+        closes = {ts.tz_convert(NY).date(): c for ts, c in df["close"].items()}
+        sessions = sorted(closes)
+        for pid, s, made in todo:
+            if s != sym:
+                continue
+            base, target = prediction_window(datetime.datetime.fromisoformat(made), sessions)
+            if not base or not target or now < datetime.datetime.combine(target, datetime.time(16, 5), NY):
+                continue
+            done.append((str(base), str(target), closes[base], closes[target],
+                         round((closes[target] / closes[base] - 1) * 100, 4), _now(), pid))
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.executemany("UPDATE predictions SET base_date=?, target_date=?, base_close=?, target_close=?, "
+                         "actual_pct=?, scored_at=? WHERE id=?", done)
+    if done:
+        log.info("예측 채점 %d건", len(done))
+    return len(done)
+
+
+def prediction_stats(df, min_n=100):
+    """채점된 예측 → 요약. 같은 종목·같은 기준일에 여러 번 예측했으면 **마지막 것만** 센다."""
+    df = df.dropna(subset=["actual_pct"]).sort_values("made_at").drop_duplicates(["symbol", "base_date"], keep="last")
+    up = df[df["up_prob"] >= 60]
+    dn = df[df["up_prob"] <= 40]
+    pos = df[df["pct"] > 0]
+    out = {"채점 건수": len(df),
+           "방향 적중 % (확률≥50 → 상승)": round(((df["up_prob"] >= 50) == (df["actual_pct"] > 0)).mean() * 100, 1) if len(df) else None,
+           "기본 상승률 %": round((df["actual_pct"] > 0).mean() * 100, 1) if len(df) else None,
+           "상승 확답(≥60) 건수": len(up),
+           "상승 확답 적중 %": round((up["actual_pct"] > 0).mean() * 100, 1) if len(up) else None,
+           "하락 확답(≤40) 건수": len(dn),
+           "하락 확답 적중 %": round((dn["actual_pct"] < 0).mean() * 100, 1) if len(dn) else None,
+           "보수적 % > 0 건수": len(pos),
+           "실제 ≥ 보수적 % 비율": round((pos["actual_pct"] >= pos["pct"]).mean() * 100, 1) if len(pos) else None}
+    out["판정"] = ("표본 부족 — 판정 보류" if len(df) < min_n else
+                 "60% 확답 기준 충족" if len(up) >= 30 and (up["actual_pct"] > 0).mean() >= 0.60 else "60% 확답 기준 미달")
+    return out
 
 
 def fetch_last_decisions(symbol, num=10):
@@ -1917,6 +2003,10 @@ def run_cycle(dry_run=None, force=False):
             reconcile_orders(toss)
         except Exception as e:  # noqa: BLE001
             log.error("주문 대사 실패(주문 판단에는 영향 없음): %s", e)
+        try:      # 지난 예측을 실제 종가로 채점 (주문 판단에는 쓰지 않는다)
+            score_predictions(toss)
+        except Exception as e:  # noqa: BLE001
+            log.error("예측 채점 실패(주문에 영향 없음): %s", e)
         log_equity(account["total_value"],     # 변동성 타겟이 쓰는 일별 자산 이력
                    sum(h["market_value"] for h in account["holdings"].values()))
         if VOL_TARGET_PCT > 0 and _vol_target_cap(verbose=True) is None:
@@ -2058,6 +2148,10 @@ def run_cycle(dry_run=None, force=False):
                 "avg_buy_price": st["avg_buy_price"], "current_price": st["current_price"]})
         if not decisions:
             raise RuntimeError("종목별 판단이 하나도 없음")
+        try:
+            log_predictions(run_id, decisions, dry)
+        except Exception as e:  # noqa: BLE001
+            log.error("예측 기록 실패(주문에 영향 없음): %s", e)
 
         # 3) 배분 → 검증 → 주문
         if needs_allocation(buying, decisions):
@@ -2106,6 +2200,12 @@ def run_analysis():
 
 if __name__ == "__main__":
     initialize_db()
+    if "--predictions" in sys.argv:            # 실전 예측 성적표 (주문·Claude 호출 없음)
+        with sqlite3.connect(DB_PATH) as _c:
+            _df = pd.read_sql("SELECT * FROM predictions", _c)
+        for _k, _v in prediction_stats(_df).items():
+            print(f"{_k}: {_v}")
+        sys.exit(0)
     log.info("모델 %s @ %s · 후보 %d · 최대 %d종목 · 종목당 %.0f%% · 현금유지 %.0f%% · 청산 %s · 실행 %s%s",
              MODEL, BASE_URL, TOP_N, MAX_POSITIONS, MAX_POSITION_PCT, CASH_RESERVE_PCT,
              (f"손절 -{STOP_LOSS_PCT:.0f}%" if STOP_LOSS_PCT > 0 else "손절 없음")
