@@ -581,4 +581,35 @@ assert at.a1_due(None) and at.a1_due(20) and not at.a1_due(19)
 at.trading_days_since = _old_days
 at.A1_TOP, at.A1_CASH_PCT, at.A1_BAND_PCT = _old_a1
 
+# --- SOXL 메인 규칙 (research/soxl_ops_parity.py 가 백테스트 동등성을 따로 검사한다) ---
+_S = at.SOXL_SYMBOL
+_plan = lambda w, age=0, tr=False: [(k, round(x, 4)) for k, x, _ in at.soxl_plan(w, age, tr)]
+assert _plan(0.0) == [("buy_to", 0.4)] and _plan(0.29) == [("buy_to", 0.4)]
+assert _plan(0.31) == [] and _plan(0.49) == []   # 경계(0.4±0.1)는 부동소수점 그대로 — 백테스트와 같은 식                               # 밴드 안은 거래 없음
+assert _plan(0.60) == [("sell_frac", round(1 - 0.4 / 0.6, 4))]
+assert _plan(0.40, 63) == [("sell_frac", 0.5)] and _plan(0.40, 63, True) == [] and _plan(0.40, 62) == []
+assert at.soxl_blocked(70, 100) and not at.soxl_blocked(71, 100)             # 252일 고점 대비 −30% 이하면 매수 중단
+
+# 전환: 전략 밖 보유는 전량 정리, SOXL 매수는 지금 현금만큼만 (매도 대금은 체결 후)
+_a = acct(100, {"MU": hold(9, 100, 100)})                                    # 총 1000, SOXL 0%
+_o, _w = at.soxl_orders(_a, 50.0, 60.0, 0, False, REGULAR)
+assert [(o["symbol"], o["side"]) for o in _o] == [("MU", "sell"), (_S, "buy")], _o
+assert _o[1]["amount_usd"] == 100 and _o[1]["quantity"] is None
+# 관망: 고점 대비 −30% 이하 → 매수하지 않고 대기
+_o, _w = at.soxl_orders(acct(1000), 50.0, 100.0, 0, False, REGULAR)
+assert _o == [] and any("관망" in w for w in _w), _w
+# 비중 60% → 40% 까지 매도, R3 가 같은 날이면 남은 수량의 50% 를 더 판다 (백테스트 순서)
+_a = acct(400, {_S: hold(12, 50, 50)})                                       # SOXL 600 / 총 1000
+_o, _ = at.soxl_orders(_a, 50.0, 60.0, 10, False, REGULAR)
+assert len(_o) == 1 and abs(_o[0]["quantity"] - 4.0) < 1e-4, _o          # 12주 × (1 − 0.4/0.6)
+_o, _ = at.soxl_orders(_a, 50.0, 60.0, 63, False, REGULAR)
+assert abs(_o[0]["quantity"] - (4.0 + 8.0 * 0.5)) < 1e-4 and "R3" in _o[0]["reason"], _o
+# 매수 상한: 목표 40% 까지, 현금 한도 안
+_o, _ = at.soxl_orders(acct(900, {_S: hold(2, 50, 50)}), 50.0, 60.0, 5, False, REGULAR)   # 10% → 40%
+assert _o[0]["side"] == "buy" and abs(_o[0]["amount_usd"] - 300) < 0.01, _o
+# 정규장 밖·미체결 UNKNOWN 이면 주문하지 않는다
+assert at.soxl_orders(acct(1000), 50.0, 60.0, 0, False, CLOSED)[0] == []
+_a = acct(1000); _a["open_unknown"] = True
+assert at.soxl_orders(_a, 50.0, 60.0, 0, False, REGULAR)[0] == []
+
 print("validate_orders OK")
