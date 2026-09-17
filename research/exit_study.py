@@ -67,6 +67,7 @@ def build(close, idx, park, start):
     ret = px.pct_change(fill_method=None)
     f = {}
     f["mom20"] = close / close.shift(20) - 1
+    f["mom20s5"] = close.shift(5) / close.shift(25) - 1        # 최근 5일을 뺀 20일 모멘텀 (entry_delay D5)
     f["mom60"] = close / close.shift(60) - 1
     f["mom126"] = close / close.shift(126) - 1
     f["mom12_1"] = close.shift(21) / close.shift(252) - 1
@@ -87,6 +88,15 @@ def build(close, idx, park, start):
     f["macdh"] = (macd - macd.ewm(span=9, adjust=False).mean()) / px
 
     ix = idx.reindex(dates).ffill()
+    # 잔차 모멘텀 (residual_mom F1·F2): 지수 1요인 회귀의 잔차. 베타는 후행 252일(최소 126).
+    ixr = ix.pct_change(fill_method=None)
+    beta = ret.rolling(252, min_periods=126).cov(ixr).div(ixr.rolling(252, min_periods=126).var(), axis=0)
+    resid = ret - beta.mul(ixr, axis=0)
+    f["rmom20"] = resid.rolling(20).sum() / resid.rolling(20).std()
+    r121 = resid.shift(21)
+    f["rmom12_1"] = r121.rolling(231, min_periods=200).sum() / r121.rolling(231, min_periods=200).std()
+    # 정보 이산성 (residual_mom F3, Da·Gurun·Warachka): sign(20일수익) × (하락일% − 상승일%). 낮을수록 '꾸준히'
+    f["id20"] = np.sign(f["mom20"]) * ((ret < 0).rolling(20).mean() - (ret > 0).rolling(20).mean())
     dd = (ix / ix.rolling(252).max() - 1) * 100
     reg = {"live_bear": (ix / ix.shift(60) - 1) * 100 < -3,          # 운영 market_regime
            "below200": ix < ix.rolling(200).mean(),
@@ -158,6 +168,11 @@ def sim(P, cfg):
     #     리셋할 수단이 없다 — 만기 이후 **매 사이클** 재확인하고 순위에서 빠지는 날 판다.
     #     운영에 옮길 수 있는 형태가 어느 쪽인지 재려고 둘을 분리했다.
     extend_daily = cfg.get("extend_daily", False)
+    #   delay: 진입 순위·자격을 k 거래일 전 정보로 매긴다 (국면 판정·지수 편입 여부는 오늘). 0 이면 현행.
+    #   pullback: 진입 후보를 최근 5일 수익률 < 0 인 종목으로 제한한다.
+    delay, pullback = cfg.get("delay", 0), cfg.get("pullback", False)
+    #   fip: 평상 국면에서 순위 상위 fip 개를 뽑은 뒤 정보 이산성(id20) 낮은 순으로 슬롯을 채운다. 0 이면 현행.
+    fip = cfg.get("fip", 0)
     feeq = fee if park else 0.0                     # 대기 현금을 QQQ 로 둘 때 드나드는 비용
 
     pos = np.zeros(m)
@@ -203,6 +218,8 @@ def sim(P, cfg):
             fl = rule_flags(u)
         bear = bool(live_regime and R["live_bear"][u])
         score = F["lowvol"][u] if bear else F[rank_key][u]
+        ue = max(u - delay, 0)                       # 진입 전용 정보 시점 (만기 연장 판정은 오늘 score 그대로)
+        escore = F["lowvol"][ue] if bear else F[rank_key][ue]
 
         # 1) 청산: 만기 → 규칙 → 소멸(가격 5일 없음)
         held = pos > 0
@@ -272,18 +289,25 @@ def sim(P, cfg):
                 elif budget < min_frac * V:
                     probe["최소주문에 막힘"] = probe.get("최소주문에 막힘", 0) + 1
             if free > 0 and budget > 1e-12:
-                ok = valid[u] & np.isfinite(score) & ~held
+                ok = valid[u] & np.isfinite(escore) & ~held
                 if entry_pos and not bear:
-                    ok &= F["mom20"][u] > 0
+                    ok &= F["mom20"][ue] > 0
+                if pullback:
+                    ok &= F["ret5"][u] < 0
                 if above200:
                     ok &= F["dist200"][u] > 0
                 if rsi_max:
                     ok &= F["rsi14"][u] < rsi_max
                 cand = np.flatnonzero(ok)
                 if cand.size:
-                    picks = cand[np.argsort(-score[cand], kind="stable")][:free]
+                    picks = cand[np.argsort(-escore[cand], kind="stable")]
+                    if fip and not bear:
+                        top = picks[:fip]
+                        idv = np.nan_to_num(F["id20"][ue][top], nan=np.inf)
+                        picks = top[np.argsort(idv, kind="stable")]
+                    picks = picks[:free]
                     if tiers:                       # 운영 MOMENTUM_TIERS × MAX_POSITION_PCT
-                        mo = F["mom20"][u]
+                        mo = F["mom20"][ue]
                         amts = [maxpos * V * (1.0 if bear or mo[c] >= .2 else .7 if mo[c] >= .1
                                               else .4 if mo[c] >= 0 else 0.0) for c in picks]
                     else:
