@@ -1711,7 +1711,7 @@ def place_all(toss, run_id, orders, dry, tag=""):
 #   5년 17.6% · −44.0%, QQQ 대비 Sharpe 차 +0.03~+0.09 (CI 0 포함). 초대형주 쏠림이 계속된다는 베팅이다.
 # ★ 이 모드에서는 LLM 전략의 강제 규칙(만기 청산·변동성 타겟·종목당 상한·유지선 복원)을 쓰지 않는다 —
 #   백테스트 A1 에 없던 규칙이고, 만기 20일은 A1 보유를 통째로 팔아 버린다.
-STRATEGY = os.environ.get("STRATEGY", "llm").strip().lower()   # llm(기존 3단계) | a1 | soxl
+STRATEGY = os.environ.get("STRATEGY", "soxl").strip().lower()  # soxl(메인, 2026-09-17 사용자 결정) | llm(기존 3단계) | a1
 A1_TOP = int(os.environ.get("A1_TOP", 10))                    # 보유 회사 수
 A1_REBAL_DAYS = int(os.environ.get("A1_REBAL_DAYS", 20))      # 재조정 주기 (거래일, 직전 수렴 시점부터)
 A1_CASH_PCT = float(os.environ.get("A1_CASH_PCT", 1))         # 수수료·반올림 여유 현금 %
