@@ -531,4 +531,46 @@ assert not at.needs_allocation(False, _hold_only)                  # 보유 판�
 assert at.needs_allocation(False, {"AAPL": {"decision": "sell"}})   # 매도 판단이 있으면 배분한다
 assert at.needs_allocation(True, _hold_only)                       # 살 수 있으면 배분한다
 
+# --- A1 기계 모드 ---
+_old_a1 = (at.A1_TOP, at.A1_CASH_PCT, at.A1_BAND_PCT)
+at.A1_TOP, at.A1_CASH_PCT, at.A1_BAND_PCT = 2, 0, 2
+_info = {"GOOG": {"englishName": "Alphabet C", "securityType": "STOCK", "sharesOutstanding": 50},
+         "GOOGL": {"englishName": "Alphabet A", "securityType": "STOCK", "sharesOutstanding": 60},
+         "AAPL": {"englishName": "Apple", "securityType": "STOCK", "sharesOutstanding": 100},
+         "ASML": {"englishName": "ASML Holding", "securityType": "DEPOSITARY_RECEIPT", "sharesOutstanding": 10},
+         "QQQ": {"englishName": "Invesco QQQ", "securityType": "ETF", "sharesOutstanding": 10 ** 9},
+         "NOPX": {"englishName": "No Price", "securityType": "STOCK", "sharesOutstanding": 10 ** 9}}
+_caps = at.a1_company_caps(_info, {"GOOG": 10, "GOOGL": 10, "AAPL": 9, "ASML": 50, "QQQ": 500})
+assert _caps == {"GOOG": 1100.0, "AAPL": 900.0, "ASML": 500.0}, _caps     # 종류별 합산·ETF·가격없음 제외
+_t = at.a1_targets(_caps)
+assert list(_t) == ["GOOG", "AAPL"] and abs(_t["GOOG"] - 0.55) < 1e-9 and abs(sum(_t.values()) - 1) < 1e-9
+
+# 첫 전환: 목표 밖 전량 매도 + 지금 현금만큼만 매수, 나머지는 대기 (매도 대금은 체결로만 생긴다)
+_a = acct(100, {"MU": hold(9, 100, 100)})                                   # 총 1000, MU 900
+_o, _w = at.a1_orders(_a, _t, REGULAR)
+assert [(o["symbol"], o["side"]) for o in _o] == [("MU", "sell"), ("GOOG", "buy")], _o
+assert _o[0]["quantity"] == 9 and _o[1]["quantity"] is None and _o[1]["amount_usd"] == 100
+assert any("AAPL 매수 대기" in w for w in _w), _w
+# 목표 ±밴드(총자산 2%) 안이면 주문도 대기도 없음 → 수렴
+_a = acct(0, {"GOOG": hold(1, 545, 545), "AAPL": hold(1, 455, 455)})
+assert at.a1_orders(_a, _t, REGULAR) == ([], [])
+# 초과분만 판다 (전량 아님)
+_a = acct(0, {"GOOG": hold(1, 700, 700), "AAPL": hold(1, 300, 300)})
+_o, _w = at.a1_orders(_a, _t, REGULAR)
+assert _o[0]["symbol"] == "GOOG" and _o[0]["side"] == "sell" and abs(_o[0]["amount_usd"] - 150) < 0.01, _o
+# 정규장 밖·미체결·미체결 UNKNOWN 이면 주문하지 않는다
+_a = acct(100, {"MU": hold(9, 100, 100)})
+_o, _w = at.a1_orders(_a, _t, CLOSED)
+assert _o == [] and all("정규장 아님" in w for w in _w), _w
+_o, _w = at.a1_orders(acct(100, {"MU": hold(9, 100, 100)}, ["MU"]), _t, REGULAR)
+assert "MU" not in [o["symbol"] for o in _o] and any("미체결" in w for w in _w)
+_a = acct(100, {"MU": hold(9, 100, 100)}); _a["open_unknown"] = True
+assert at.a1_orders(_a, _t, REGULAR)[0] == []
+# 재조정 주기: 수렴 기록이 없으면 바로, 있으면 A1_REBAL_DAYS 거래일 뒤
+_old_days = at.trading_days_since
+at.trading_days_since = lambda d: None if d is None else d
+assert at.a1_due(None) and at.a1_due(20) and not at.a1_due(19)
+at.trading_days_since = _old_days
+at.A1_TOP, at.A1_CASH_PCT, at.A1_BAND_PCT = _old_a1
+
 print("validate_orders OK")

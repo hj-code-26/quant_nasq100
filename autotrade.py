@@ -1620,6 +1620,138 @@ def place_all(toss, run_id, orders, dry, tag=""):
     return results
 
 
+# ---------- A1 기계 모드: 시총 상위 N 회사를 시총 비중으로 (Claude 호출 없음) ----------
+# 근거: research/mcap_momentum.md (A1 CANDIDATE — ADOPT 아님, DSR 0.02). 11년 CAGR 24.0% · MDD −43.8%,
+#   5년 17.6% · −44.0%, QQQ 대비 Sharpe 차 +0.03~+0.09 (CI 0 포함). 초대형주 쏠림이 계속된다는 베팅이다.
+# ★ 이 모드에서는 LLM 전략의 강제 규칙(만기 청산·변동성 타겟·종목당 상한·유지선 복원)을 쓰지 않는다 —
+#   백테스트 A1 에 없던 규칙이고, 만기 20일은 A1 보유를 통째로 팔아 버린다.
+STRATEGY = os.environ.get("STRATEGY", "llm").strip().lower()   # llm(기본, 기존 3단계) | a1
+A1_TOP = int(os.environ.get("A1_TOP", 10))                    # 보유 회사 수
+A1_REBAL_DAYS = int(os.environ.get("A1_REBAL_DAYS", 20))      # 재조정 주기 (거래일, 직전 수렴 시점부터)
+A1_CASH_PCT = float(os.environ.get("A1_CASH_PCT", 1))         # 수수료·반올림 여유 현금 %
+A1_BAND_PCT = float(os.environ.get("A1_BAND_PCT", 2))         # 목표와 이만큼(총자산 %) 이내면 거래 안 함
+A1_TYPES = ("STOCK", "DEPOSITARY_RECEIPT")
+
+
+def a1_company_caps(info, prices):
+    """회사 단위 시가총액 {대표 티커: 시총}. 토스 sharesOutstanding 은 **주식 종류별**이라
+    (GOOG=C주, GOOGL=A주) 영문명의 종류 접미사를 떼고 합친다. 대표 티커는 알파벳 순 첫 번째 —
+    백테스트(pit_mcap)와 같은 규칙. ADR 은 토스가 ADS 단위로 줘서 현재가를 그대로 곱하면 된다."""
+    groups = {}
+    for sym, s in info.items():
+        sh, px = s.get("sharesOutstanding"), prices.get(sym)
+        if not sh or not px or s.get("securityType") not in A1_TYPES:
+            continue
+        name = (s.get("englishName") or sym).strip()
+        parts = name.rsplit(" ", 1)
+        key = parts[0] if len(parts) == 2 and parts[1] in ("A", "B", "C") else name
+        groups.setdefault(key, []).append((sym, float(sh) * float(px)))
+    return {min(t for t, _ in v): sum(c for _, c in v) for v in groups.values()}
+
+
+def a1_caps(toss, universe=TICKERS):
+    info, prices = {}, {}
+    for i in range(0, len(universe), 20):
+        chunk = universe[i:i + 20]
+        info.update({s["symbol"]: s for s in toss.stocks(*chunk)})
+        prices.update({p["symbol"]: float(p["lastPrice"]) for p in toss.prices(*chunk)})
+    caps = a1_company_caps(info, prices)
+    # 일부만 받아 순위를 매기면 빠진 대형주 대신 엉뚱한 종목을 산다 — 커버리지가 낮으면 거래하지 않는다
+    covered = sum(1 for s in universe if s in prices and info.get(s, {}).get("sharesOutstanding"))
+    if covered < 0.9 * len(universe) or len(caps) < A1_TOP:
+        raise RuntimeError(f"A1 시총 데이터 부족: {covered}/{len(universe)}종목 — 이번 사이클 거래 안 함")
+    return caps
+
+
+def a1_targets(caps, top=None):
+    best = sorted(caps.items(), key=lambda kv: -kv[1])[:top or A1_TOP]
+    tot = sum(c for _, c in best)
+    return {s: c / tot for s, c in best}
+
+
+def a1_orders(account, targets, session):
+    """목표 비중 대비 차이 → (주문 목록, 대기 사유). 둘 다 비면 수렴(재조정 완료).
+
+    매도는 제출할 수 있어도 매수 현금은 **체결로만** 생긴다(P0-4). 그래서 첫 사이클은 매도와
+    지금 현금만큼의 매수만 내고, 나머지는 '대기' 로 남겨 다음 사이클이 이어서 한다.
+    소수점·금액 주문은 정규장(마감 1시간 전까지)에만 되므로 그 밖에서는 전부 대기한다."""
+    if account.get("open_unknown"):
+        return [], ["OPEN_UNKNOWN: 미체결 상태를 몰라 초과 매매 위험 — 보류"]
+    frac = fractional_allowed(session)
+    total = account["total_value"]
+    invest = total * (1 - A1_CASH_PCT / 100)
+    band = max(MIN_ORDER_USD, total * A1_BAND_PCT / 100)
+    holdings, busy = account["holdings"], set(account["open_orders"])
+    orders, waiting = [], []
+
+    def order(sym, side, qty, price, amount, why):
+        orders.append({"symbol": sym, "side": side, "quantity": qty, "price": price,
+                       "limit_price": None, "amount_usd": round(amount, 2), "whole": False,
+                       "cancel_first": False, "reason": f"A1 재조정 — {why}"})
+
+    for sym, h in sorted(holdings.items()):
+        want = targets.get(sym, 0.0) * invest
+        extra = h["market_value"] - want
+        if sym in targets and extra <= band:
+            continue
+        if sym in busy or not frac:
+            waiting.append(f"{sym} 매도 대기 ({'미체결 주문' if sym in busy else '정규장 아님'})")
+            continue
+        if sym not in targets:          # 목표 밖은 전량 (전량 매도는 최소 금액 예외)
+            order(sym, "sell", round(h["quantity"], 6), h["last_price"], h["market_value"], "상위 목록 밖 전량 매도")
+            continue
+        qty = round(h["quantity"] * min(1.0, extra / h["market_value"]), 6)
+        order(sym, "sell", qty, h["last_price"], qty * h["last_price"],
+              f"목표 {targets[sym]:.1%} 초과분 ${extra:.2f}")
+    cash = account["cash"] - total * A1_CASH_PCT / 100
+    for sym, w in sorted(targets.items(), key=lambda kv: -kv[1]):
+        need = w * invest - holdings.get(sym, {}).get("market_value", 0.0)
+        if need <= band:
+            continue
+        if sym in busy or not frac:
+            waiting.append(f"{sym} 매수 대기 ({'미체결 주문' if sym in busy else '정규장 아님'})")
+            continue
+        amount = min(need, cash)
+        if amount < MIN_ORDER_USD:
+            waiting.append(f"{sym} 매수 대기 (현금 ${cash:.2f} — 매도 체결 후)")
+            continue
+        order(sym, "buy", None, holdings.get(sym, {}).get("last_price"), amount, f"목표 {w:.1%} 부족분 ${need:.2f}")
+        cash -= amount
+    return orders, waiting
+
+
+def a1_last_converged():
+    """실주문 모드에서 마지막으로 목표에 수렴한 시각. 재조정 주기는 여기서부터 센다."""
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute("SELECT timestamp FROM runs WHERE summary LIKE 'A1 수렴%' AND dry_run=0 "
+                           "ORDER BY id DESC LIMIT 1").fetchone()
+    return row[0] if row else None
+
+
+def a1_due(last):
+    held = trading_days_since(last)
+    return held is None or held >= A1_REBAL_DAYS
+
+
+def run_a1(toss, run_id, account, session, dry):
+    """A1 한 사이클 → 요약 문자열. Claude 를 부르지 않는다."""
+    last = a1_last_converged()
+    targets = a1_targets(a1_caps(toss))
+    log.info("A1 목표 (시총 상위 %d): %s", A1_TOP, {s: f"{w:.1%}" for s, w in targets.items()})
+    if not a1_due(last):
+        left = A1_REBAL_DAYS - trading_days_since(last)
+        log.info("A1 대기: 마지막 수렴 %s, 다음 재조정까지 %d거래일", last, left)
+        return f"A1 대기 — 다음 재조정까지 {left}거래일"
+    orders, waiting = a1_orders(account, targets, session)
+    for w in waiting:
+        log.info("A1 %s", w)
+    if not orders and not waiting:
+        log.info("A1 수렴: 모든 종목이 목표 ±%.0f%% 안 — 재조정 주기를 새로 센다", A1_BAND_PCT)
+        return "A1 수렴 — 재조정 완료"
+    res = place_all(toss, run_id, orders, dry, tag="[A1]")
+    return f"A1 재조정 진행 — 주문 {len(orders)}건 {dict(collections.Counter(res.values()))} · 대기 {len(waiting)}건"
+
+
 def reconcile_orders(toss, limit=100):
     """미완료 durable intent 를 브로커와 대사해 최종 상태로 닫는다 → 상태별 건수.
 
@@ -1805,6 +1937,13 @@ def run_cycle(dry_run=None, force=False):
             idx = None
         global TRADING_DAYS, BEAR_CAP
         TRADING_DAYS = ([d.astimezone(NY).date() for d in idx.index] if idx is not None else [])
+        if STRATEGY == "a1":
+            if not TRADING_DAYS:
+                log.warning("A1: 거래일 달력 없음 — 재조정 주기가 주말만 빼는 근사로 계산된다")
+            db_update_run(run_id, status="done", summary=run_a1(toss, run_id, account, session, dry))
+            return
+        if STRATEGY != "llm":
+            raise RuntimeError(f"알 수 없는 STRATEGY={STRATEGY!r} (llm | a1) — 주문하지 않는다")
         # 오버레이 상한은 위험관리 패스(바로 아래)보다 먼저 정해져야 한다 — 축소 매도가 거기서 난다
         BEAR_CAP = bear_derisk(idx)
         if BEAR_CAP is not None:
