@@ -7,7 +7,7 @@
   3) 배분       : 종목별 판단 + 계좌 상태 + 규칙을 Claude 에 주고 최종 주문 목록 (호출 1회)
                  → 코드가 규칙(최대 종목 수·비중·현금 유지·최소 주문)으로 다시 검증 → 주문
 
-실행:  python autotrade.py            (즉시 1회 + TRADE_TIMES 에 반복. 예약 실행은 정규장 시간에만)
+실행:  python autotrade.py            (즉시 1회 + TRADE_TIMES 에 반복. 장 밖은 주문 없는 사전 분석, 휴장일은 건너뜀)
        python autotrade.py --once     (1회만, 장 시간 무시)
 설정:  .env 참고. DRY_RUN=1 이면 주문 없이 전 과정을 기록만 한다.
 """
