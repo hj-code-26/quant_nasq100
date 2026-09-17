@@ -67,6 +67,10 @@ MAX_POSITIONS = int(os.environ.get("MAX_POSITIONS", 10))  # 동시 보유 최대
 MAX_POSITION_PCT = float(os.environ.get("MAX_POSITION_PCT", 15))   # 종목당 최대 비중 (총자산 대비 %)
 CASH_RESERVE_PCT = float(os.environ.get("CASH_RESERVE_PCT", 10))   # 항상 남겨둘 현금 비중 (%)
 MIN_ORDER_USD = float(os.environ.get("MIN_ORDER_USD", 5))
+# 현금 유지선 복원: 현금(+이미 나간 매도 예정액)이 유지선 × 이 비율 미만이면 큰 종목부터 팔아 유지선을 채운다.
+# 0 이면 끔(기본). 권장 0.5. 백테스트(research/reserve_restore.py)에서는 발동 0일 — 전략이 설계대로
+# 돌면 생기지 않는 상황이고, 수동 매매 등으로 현금이 바닥났을 때 매수가 영구히 막히는 교착을 푸는 복구 장치다.
+RESERVE_RESTORE = float(os.environ.get("RESERVE_RESTORE", 0))
 STOP_LOSS_PCT = float(os.environ.get("STOP_LOSS_PCT", 0))    # 평단 대비 -N% 면 전량 매도 (0 이면 끔)
 # 기본 꺼짐: -10~-30% 전 구간에서 성적이 나빠졌다. -25%는 검증 Sharpe 1.34→0.95, CAGR 33.0→24.2%
 MOMENTUM_EXIT = os.environ.get("MOMENTUM_EXIT", "0") == "1"  # 20일 수익률 음전 시 전량 매도.
@@ -1181,6 +1185,22 @@ def forced_exits(decisions, account):
     return out
 
 
+def buy_room(account):
+    """신규 매수에 쓸 수 있는 현금 = 현금 − 유지선. 음수일 수 있다."""
+    return account["cash"] - account["total_value"] * CASH_RESERVE_PCT / 100
+
+
+def can_buy(account):
+    """이번 사이클에 매수가 하나라도 나갈 수 있는가. 아니면 매수 후보 선별·판단(Claude 호출)을 건너뛴다.
+    매도로 들어올 돈은 체결 전이라 치지 않는다 — 현금·슬롯은 체결로만 생긴다 (P0-4)."""
+    return buy_room(account) >= MIN_ORDER_USD
+
+
+def needs_allocation(buying, decisions):
+    """3단계 배분 호출이 필요한가 — 매수가 가능하거나, 매도 판단이 하나라도 있을 때만."""
+    return buying or any(d["decision"] == "sell" for d in decisions.values())
+
+
 def validate_orders(plan, decisions, account, session, entries=None, skip_symbols=(),
                     extend_ok=(), extend_unknown=False):
     """Claude 의 주문 목록을 규칙으로 걸러 실제 낼 주문만 남긴다. 매도 먼저, 매수 나중.
@@ -1193,7 +1213,7 @@ def validate_orders(plan, decisions, account, session, entries=None, skip_symbol
     pre = extended_hours(session)
     holdings = dict(account["holdings"])
     total = account["total_value"]
-    cash_left = account["cash"] - total * CASH_RESERVE_PCT / 100
+    cash_left = buy_room(account)
     positions = set(holdings)
     out, skipped = [], []
     open_by = account.get("open_by_symbol") or {sym: [] for sym in account["open_orders"]}
@@ -1233,13 +1253,10 @@ def validate_orders(plan, decisions, account, session, entries=None, skip_symbol
     # 어느 제약이 상한을 묶었는지 — 사유 코드로 남겨야 나중에 오버레이 기여를 분리할 수 있다
     src = ("REGIME_DERISK — 하락 국면 노출 상한" if BEAR_CAP is not None and cap >= BEAR_CAP
            else "변동성 타겟 — 주식 노출 상한") if cap is not None else ""
-    if cap is not None and total > 0:
-        # 세 가지를 구분한다: **실제 체결 노출**(holdings) · **미체결 예약량**(떠 있는 매도
-        # 주문 + 이번 사이클에 이미 잡힌 강제 매도) · **목표 노출**(total × cap).
-        # 예약량을 이미 줄어든 것으로 치면 축소가 모자라고, 무시하면 두 번 판다.
-        # 예약은 '체결' 이 아니므로 stock_value 에서 빼지 않고 축소해야 할 금액에서만 뺀다.
-        stock_value = sum(h["market_value"] for h in holdings.values())
-        named = {str(o["symbol"]).upper() for o in sells}
+    def reserved_proceeds():
+        """미체결 예약량(떠 있는 매도 주문 + 이번 사이클에 이미 잡힌 매도)의 달러 환산.
+        예약은 '체결' 이 아니므로 보유·현금에서 빼지 않고, 더 팔아야 할 금액에서만 뺀다.
+        이미 줄어든 것으로 치면 축소가 모자라고, 무시하면 두 번 판다."""
         reserved = 0.0
         for sym, h in holdings.items():
             q = pending_sell(sym) or 0.0
@@ -1247,28 +1264,38 @@ def validate_orders(plan, decisions, account, session, entries=None, skip_symbol
                 if str(o["symbol"]).upper() == sym:
                     q = max(q, h["quantity"] * min(100.0, float(o.get("sell_pct") or 0)) / 100)
             reserved += min(q, h["quantity"]) * h["last_price"]
+        return reserved
+
+    def trim_largest(amount, reason):
+        """큰 종목부터 amount 달러만큼 매도 의도를 더한다 (이미 매도가 잡힌 종목·최소 주문 미만은 건너뜀).
+        백테스트는 전 종목 비례였지만, 실전은 최소 주문 금액과 수수료 때문에 큰 종목부터 깎는다."""
+        named = {str(o["symbol"]).upper() for o in sells}
+        for sym, h in sorted(holdings.items(), key=lambda kv: -kv[1]["market_value"]):
+            if amount <= MIN_ORDER_USD:
+                break
+            if sym in named:
+                continue
+            free_qty = h["quantity"] - min(pending_sell(sym) or 0.0, h["quantity"])
+            if free_qty <= 0:          # 이미 전량이 매도 주문으로 떠 있다
+                continue
+            cut = min(amount, free_qty * h["last_price"])
+            if cut < MIN_ORDER_USD:
+                continue
+            sells.append({"symbol": sym, "side": "sell",
+                          "sell_pct": round(min(100.0, cut / h["market_value"] * 100), 2),
+                          "reason": reason, "forced": True})
+            named.add(sym)
+            amount -= cut
+
+    if cap is not None and total > 0:
+        # 세 가지를 구분한다: **실제 체결 노출**(holdings) · **미체결 예약량** · **목표 노출**(total × cap).
+        stock_value = sum(h["market_value"] for h in holdings.values())
+        reserved = reserved_proceeds()
         excess = stock_value - total * cap - reserved
         if excess > MIN_ORDER_USD:
             log.info("노출 축소(%s): 주식 %.1f%% → 상한 %.0f%%, 예약 $%.2f 제외하고 %.2f 달러 줄인다",
                      src.split(" —")[0], stock_value / total * 100, cap * 100, reserved, excess)
-            for sym, h in sorted(holdings.items(), key=lambda kv: -kv[1]["market_value"]):
-                if excess <= MIN_ORDER_USD:
-                    break
-                if sym in named:
-                    continue
-                free_qty = h["quantity"] - min(pending_sell(sym) or 0.0, h["quantity"])
-                if free_qty <= 0:          # 이미 전량이 매도 주문으로 떠 있다
-                    continue
-                cut = min(excess, free_qty * h["last_price"])
-                pct = min(100.0, cut / h["market_value"] * 100)
-                if cut < MIN_ORDER_USD:
-                    continue
-                sells.append({
-                    "symbol": sym, "side": "sell", "sell_pct": round(pct, 2),
-                    "reason": f"{src} {cap * 100:.0f}% 초과분 축소",
-                    "forced": True})
-                named.add(sym)
-                excess -= cut
+            trim_largest(excess, f"{src} {cap * 100:.0f}% 초과분 축소")
 
     buys = [o for o in plan["orders"] if o["side"] == "buy"]
     # 만기 청산: 보유 MAX_HOLD_DAYS 거래일이 지난 종목은 Claude 판단과 무관하게 전량 매도한다.
@@ -1303,6 +1330,18 @@ def validate_orders(plan, decisions, account, session, entries=None, skip_symbol
                                            else "") + " — 코드 강제 청산"})
                 log.info("만기 청산 %s: 보유 %d거래일%s", sym, held,
                          f" · 상위 {HOLD_EXTEND_TOP}위 밖" if HOLD_EXTEND_TOP else "")
+    # 현금 유지선 복원 — 만기·노출 축소·Claude 매도·떠 있는 매도로 들어올 돈을 먼저 치고, 그래도 모자라면 판다.
+    # 이게 없으면 현금이 바닥난 계좌는 만기까지 매수가 영구히 막힌다 (2026-09-09~ 43+사이클 무주문).
+    if RESERVE_RESTORE > 0 and CASH_RESERVE_PCT > 0 and total > 0:
+        target = total * CASH_RESERVE_PCT / 100
+        incoming = reserved_proceeds()
+        short = target - account["cash"] - incoming
+        if account["cash"] + incoming < target * RESERVE_RESTORE and short > MIN_ORDER_USD:
+            log.warning("현금 유지선 복원: 현금 $%.2f + 매도 예정 $%.2f < 유지선 $%.2f × %.2f "
+                        "→ 큰 종목부터 $%.2f 매도", account["cash"], incoming, target,
+                        RESERVE_RESTORE, short)
+            trim_largest(short, f"현금 유지선 복원 — 현금 ${account['cash']:.2f} < 유지선 "
+                                f"${target:.2f} × {RESERVE_RESTORE:g}")
     done = set()
     for o in sells:
         sym = str(o["symbol"]).upper()
@@ -1677,7 +1716,7 @@ def log_funnel(rows, picks, decisions, plan, risk_orders, orders, skipped, accou
     d = collections.Counter(v["decision"] for v in decisions.values())
     plan_buy = sum(1 for o in plan["orders"] if o.get("side") == "buy")
     plan_sell = sum(1 for o in plan["orders"] if o.get("side") == "sell")
-    cash_left = account["cash"] - account["total_value"] * CASH_RESERVE_PCT / 100
+    cash_left = buy_room(account)
     log.info("퍼널: 스크리닝 %d → 후보 %d → 판단 %d(매수%d·매도%d·보유%d) → 배분 %d(매수%d·매도%d) "
              "→ 주문 %d(위험관리 %d) · 제외 %d | 가용현금 $%.2f (현금 $%.2f − 유지선 $%.2f)",
              len(rows), len(picks), len(decisions), d["buy"], d["sell"], d["hold"],
@@ -1832,13 +1871,24 @@ def run_cycle(dry_run=None, force=False):
         else:
             log.info("스크리닝 %d종목, 20일 수익률 상위: %s", len(rows),
                      [(r["symbol"], r["ret_20d_pct"]) for r in rows[:8]])
-        picks = pick_candidates(rows, account, regime)
+        # ★ 살 돈이 없으면 매수 후보 선별·후보 판단을 건너뛴다 — 결과가 주문이 될 수 없는데
+        #   사이클마다 Claude 를 ~19회 부르고 있었다 (2026-09-17 추정 $0.92/사이클).
+        #   보유 종목 판단(재량 매도)은 계속한다.
+        buying = can_buy(account)
+        picks = pick_candidates(rows, account, regime) if buying else []
+        if not buying:
+            log.info("매수 여력 없음 (가용현금 $%.2f < 최소 주문 $%.2f) — 후보 선별·판단 생략, "
+                     "보유 종목 매도 판단만", buy_room(account), MIN_ORDER_USD)
         reasons = {p["symbol"]: p["reason"] for p in picks}
         log.info("후보: %s", list(reasons))
         db_update_run(run_id, candidates=json.dumps(picks, ensure_ascii=False))
 
         # 2) 종목별 판단 (후보 + 보유)
         symbols = list(dict.fromkeys(list(reasons) + list(account["holdings"])))
+        if not symbols:
+            log.info("판단할 종목 없음 (매수 여력 없음 · 보유 없음) — 사이클 종료")
+            db_update_run(run_id, status="done", summary="매수 여력 없음 · 보유 없음")
+            return
         decisions = decide_all(toss, symbols, account, reasons, regime, entries)
         for d in decisions.values():
             st = d["status"]
@@ -1851,7 +1901,10 @@ def run_cycle(dry_run=None, force=False):
             raise RuntimeError("종목별 판단이 하나도 없음")
 
         # 3) 배분 → 검증 → 주문
-        plan = allocate(decisions, account, session, regime, entries)
+        if needs_allocation(buying, decisions):
+            plan = allocate(decisions, account, session, regime, entries)
+        else:
+            plan = {"orders": [], "summary": "매수 여력 없음 · 보유 매도 판단 없음 — 배분(Claude) 생략"}
         log.info("배분 요약: %s", plan["summary"])
         account = account_state(toss)          # LLM 왕복 동안 바뀐 현금·보유를 반영
         stale = (time.time() - t_snapshot) / 60

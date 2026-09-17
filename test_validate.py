@@ -489,4 +489,45 @@ with _sq.connect(_tmpdb) as _c:
 at.HOLD_EXTEND_TOP, at.HOLD_EXTEND_SHADOW = _old_extend, 20
 at.DB_PATH = _old_db
 
+# --- 현금 유지선 복원 (RESERVE_RESTORE): 현금이 바닥난 계좌의 매수 영구 교착을 푼다 ---
+_old = (at.STOP_LOSS_PCT, at.MOMENTUM_EXIT, at.MAX_HOLD_DAYS, at.RESERVE_RESTORE, at.exposure_cap)
+at.STOP_LOSS_PCT, at.MOMENTUM_EXIT, at.MAX_HOLD_DAYS = 0, False, 0
+at.exposure_cap = lambda verbose=False: None
+_h = {"AAPL": hold(1, 500, 600), "MSFT": hold(1, 300, 400)}       # 주식 1000, 현금 0.01 → 유지선 100
+at.RESERVE_RESTORE = 0                                             # 꺼짐(기본) → 현행 동작 그대로
+_o, _ = at.validate_orders({"orders": [], "summary": ""}, {}, acct(0.01, _h), REGULAR, {})
+assert _o == [], _o
+at.RESERVE_RESTORE = 0.5
+_o, _ = at.validate_orders({"orders": [], "summary": ""}, {}, acct(0.01, _h), REGULAR, {})
+assert len(_o) == 1 and _o[0]["symbol"] == "AAPL" and "유지선" in _o[0]["reason"], _o   # 큰 종목부터
+assert abs(_o[0]["amount_usd"] - 99.99) < 0.1, _o    # 유지선까지만 판다 (전량 아님, sell_pct 반올림 오차)
+# 현금이 유지선의 절반 이상이면 발동하지 않는다 (가격 상승으로 조금 모자란 건 정상 상태)
+_o, _ = at.validate_orders({"orders": [], "summary": ""}, {}, acct(60, _h), REGULAR, {})
+assert _o == [], _o
+# 이미 떠 있는 매도가 부족분을 덮으면 두 번 팔지 않는다
+_pend = {"MSFT": [{"orderId": "p", "side": "SELL", "quantity": 1.0, "filled": 0.0, "remaining": 1.0,
+                   "price": None, "state": "ACKNOWLEDGED"}]}
+_o, _ = at.validate_orders({"orders": [], "summary": ""}, {}, acct(0.01, _h, _pend), REGULAR, {})
+assert _o == [], _o
+# 만기 청산으로 들어올 돈도 먼저 친다 — AAPL 만기 전량이면 추가 복원 매도는 없다
+at.MAX_HOLD_DAYS = 20
+_old_days = at.trading_days_since
+at.trading_days_since = lambda d: None if d is None else d
+_o, _ = at.validate_orders({"orders": [], "summary": ""}, {}, acct(0.01, _h), REGULAR, {"AAPL": 20})
+assert [(o["symbol"], "만기" in o["reason"]) for o in _o] == [("AAPL", True)], _o
+at.trading_days_since = _old_days
+# 장외(정수 주만)에서 1주 미만 부분 매도는 다음 정규장으로 미룬다 — 소수점 주문 거절(400) 방지
+at.MAX_HOLD_DAYS = 0
+_o, _sk = at.validate_orders({"orders": [], "summary": ""}, {}, acct(0.01, _h), CLOSED, {})
+assert _o == [] and any("FRACTIONAL_SESSION" in s["skipped"] for s in _sk), (_o, _sk)
+(at.STOP_LOSS_PCT, at.MOMENTUM_EXIT, at.MAX_HOLD_DAYS, at.RESERVE_RESTORE, at.exposure_cap) = _old
+
+# --- 살 돈이 없으면 매수 분석(Claude)을 건너뛴다 ---
+assert not at.can_buy(acct(0.01, _h)) and at.can_buy(acct(200, _h))
+assert not at.can_buy(acct(104, _h))                               # 104 − 유지선 110.4 < 5
+_hold_only = {"AAPL": {"decision": "hold"}}
+assert not at.needs_allocation(False, _hold_only)                  # 보유 판단이 전부 hold → 배분 생략
+assert at.needs_allocation(False, {"AAPL": {"decision": "sell"}})   # 매도 판단이 있으면 배분한다
+assert at.needs_allocation(True, _hold_only)                       # 살 수 있으면 배분한다
+
 print("validate_orders OK")
