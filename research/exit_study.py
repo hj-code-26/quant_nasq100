@@ -277,6 +277,28 @@ def sim(P, cfg):
                     exits.append((t, c, "노출축소"))
                     close_out(np.arange(m) == c)
 
+        # 2-1) 현금 유지선 복원 (reserve_restore): 현금이 유지선 × restore 미만이면 큰 종목부터 팔아 유지선까지 채운다
+        restore = cfg.get("restore")
+        if restore and reserve:
+            V = cash + pos.sum()
+            if cash < reserve * V * restore:
+                need = reserve * V - cash
+                if probe is not None:
+                    probe["복원 발동"] = probe.get("복원 발동", 0) + 1
+                for c in np.argsort(-pos):
+                    if need <= min_frac * V or pos[c] <= 0:
+                        break
+                    cut = min(need / (1 - fee), pos[c])
+                    if cut < min_frac * V:
+                        continue
+                    pos[c] -= cut
+                    traded += cut
+                    cash += cut * (1 - fee)
+                    need -= cut * (1 - fee)
+                    if pos[c] <= 1e-12:
+                        exits.append((t, c, "유지선복원"))
+                        close_out(np.arange(m) == c)
+
         # 3) 진입
         if not (mkt == "nonew" and R["below200"][u]) and not (bear_noentry and bear):
             held = pos > 0
