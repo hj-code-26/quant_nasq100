@@ -112,11 +112,13 @@ def sim(px, cfg):
     seed = unit = spent = 0.0
     tranche_left, tranche_amt = 0, 0.0
 
+    r1_cap = cfg.get("r1_cap", 0.70)
+
     def buy(amount, i):
         nonlocal cash, qty, cost, trades
         V = cash + qty * c[i]
-        if risk:                                        # R1: 매수 후 SOXL 비중 ≤ 70%
-            amount = min(amount, max(0.0, 0.70 * V - qty * c[i]) / (1 + FEE))
+        if risk:                                        # R1: 매수 후 SOXL 비중 ≤ r1_cap
+            amount = min(amount, max(0.0, r1_cap * V - qty * c[i]) / (1 + FEE))
         amount = min(amount, cash / (1 + FEE))
         if amount <= 1e-9:
             return 0.0
@@ -197,7 +199,7 @@ def sim(px, cfg):
         # R3: 포지션 나이 63거래일 → 50% 축소 (포지션당 1회)
         if qty > 0:
             age += 1
-            if risk and age >= 63 and not trimmed_age:
+            if risk and not cfg.get("no_r3") and age >= 63 and not trimmed_age:
                 pending.append(("sell", 0.5))
                 trimmed_age = True
         else:
