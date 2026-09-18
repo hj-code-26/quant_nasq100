@@ -612,4 +612,22 @@ assert at.soxl_orders(acct(1000), 50.0, 60.0, 0, False, CLOSED)[0] == []
 _a = acct(1000); _a["open_unknown"] = True
 assert at.soxl_orders(_a, 50.0, 60.0, 0, False, REGULAR)[0] == []
 
+# --- SOXL 오버레이 (LLM 모드 안): 다른 보유는 안 건드림, 매수는 추세 신호 + 유지선 위 현금, 목표 15% ---
+_ov = lambda a, sma, age=0: at.soxl_orders(a, 50.0, 60.0, age, False, REGULAR, at.SOXL_OV_TARGET,
+                                           at.SOXL_OV_BAND, at.SOXL_OV_MAX, sma200=sma, overlay=True)
+_a = acct(900, {"MU": hold(1, 100, 100)})                                    # 총 1000, SOXL 미보유
+_o, _w = _ov(_a, 40.0)
+assert [(o["symbol"], o["side"]) for o in _o] == [(_S, "buy")], _o           # MU 는 팔지 않는다
+assert abs(_o[0]["amount_usd"] - min(150, at.buy_room(_a))) < 0.01, _o
+_o, _w = _ov(_a, 55.0)                                                       # 현재가 < 200일선 → 신호 없음
+assert _o == [] and any("신호 없음" in w for w in _w), _w
+assert _ov(_a, float("nan"))[0] == []                                        # 200봉 부족 → 사지 않는다
+_o, _ = _ov(acct(750, {_S: hold(5, 50, 50)}), 40.0)                          # 비중 25% → 15% 까지 매도
+assert len(_o) == 1 and _o[0]["side"] == "sell" and abs(_o[0]["quantity"] - 2.0) < 1e-4, _o
+_o, _ = _ov(acct(850, {_S: hold(3, 50, 50)}), 99.0, age=63)                  # 밴드 안·신호 없어도 R3 는 난다
+assert len(_o) == 1 and "R3" in _o[0]["reason"] and abs(_o[0]["quantity"] - 1.5) < 1e-4, _o
+# LLM 이 보는 계좌에서는 SOXL 이 빠진다 (손절·만기·노출 축소·유지선 복원 대상 아님)
+_v = at.without_soxl(acct(100, {_S: hold(2, 50, 50), "MU": hold(1, 100, 100)}, [_S]))
+assert list(_v["holdings"]) == ["MU"] and _v["open_orders"] == [] and _v["total_value"] == 200, _v
+
 print("validate_orders OK")

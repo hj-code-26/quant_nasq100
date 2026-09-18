@@ -1711,7 +1711,7 @@ def place_all(toss, run_id, orders, dry, tag=""):
 #   5년 17.6% · −44.0%, QQQ 대비 Sharpe 차 +0.03~+0.09 (CI 0 포함). 초대형주 쏠림이 계속된다는 베팅이다.
 # ★ 이 모드에서는 LLM 전략의 강제 규칙(만기 청산·변동성 타겟·종목당 상한·유지선 복원)을 쓰지 않는다 —
 #   백테스트 A1 에 없던 규칙이고, 만기 20일은 A1 보유를 통째로 팔아 버린다.
-STRATEGY = os.environ.get("STRATEGY", "soxl").strip().lower()  # soxl(메인, 2026-09-17 사용자 결정) | llm(기존 3단계) | a1
+STRATEGY = os.environ.get("STRATEGY", "llm").strip().lower()   # llm(기본, 기존 3단계 + SOXL 오버레이) | soxl(단독) | a1
 A1_TOP = int(os.environ.get("A1_TOP", 10))                    # 보유 회사 수
 A1_REBAL_DAYS = int(os.environ.get("A1_REBAL_DAYS", 20))      # 재조정 주기 (거래일, 직전 수렴 시점부터)
 A1_CASH_PCT = float(os.environ.get("A1_CASH_PCT", 1))         # 수수료·반올림 여유 현금 %
@@ -1850,15 +1850,23 @@ SOXL_MAX_WEIGHT = 0.70      # R1: 매수 후 비중 상한 (현금 30% 유지)
 SOXL_DD_BLOCK = -0.30       # R2p: SOXL 252일 고점 대비 이하이면 신규 매수 중단
 SOXL_TRIM_AGE = 63          # R3: 포지션 나이(거래일) 도달 시 50% 축소, 포지션당 1회
 
+# SOXL 오버레이 (STRATEGY=llm 안에서, 2026-09-17 사용자 결정): LLM 은 SOXL 을 보지 않고, SOXL 은 이 규칙만 따른다.
+#   미보유 → 매수 신호(종가 > 200일선 · 252일 고점 대비 −30% 초과)만 확인한다. 밴드 매도·R3 는 보유 중에만 켜진다.
+#   보유 → 목표 15% (10% 미만이면 신호 있을 때 매수, 20% 초과면 15% 까지 매도), 상한 25%, R3 63일 50% 축소.
+#   매수 금액은 현금 유지선(CASH_RESERVE_PCT) 위 현금만 쓴다 — 유지선을 깎으면 LLM 쪽 복원 매도가 난다.
+#   백테스트 검증은 안 했다 (단독 SOXL C2 는 40%·신호 없음 기준).
+SOXL_OVERLAY = os.environ.get("SOXL_OVERLAY", "1") != "0"
+SOXL_OV_TARGET, SOXL_OV_BAND, SOXL_OV_MAX = 0.15, 0.05, 0.25
 
-def soxl_plan(weight, age, trimmed):
+
+def soxl_plan(weight, age, trimmed, target=SOXL_TARGET, band=SOXL_BAND):
     """오늘 종가 기준 결정 → 의도 목록 [(종류, 값, 사유)]. 종류 buy_to(목표비중) | sell_frac(남은 수량 비율).
     백테스트(soxl_rules.sim M3·risk=price)와 같은 순서: 밴드 리밸런싱 → R3."""
     acts = []
-    if weight < SOXL_TARGET - SOXL_BAND:
-        acts.append(("buy_to", SOXL_TARGET, f"비중 {weight:.1%} < {SOXL_TARGET - SOXL_BAND:.0%} → {SOXL_TARGET:.0%}"))
-    elif weight > SOXL_TARGET + SOXL_BAND:
-        acts.append(("sell_frac", 1 - SOXL_TARGET / weight, f"비중 {weight:.1%} > {SOXL_TARGET + SOXL_BAND:.0%} → {SOXL_TARGET:.0%}"))
+    if weight < target - band:
+        acts.append(("buy_to", target, f"비중 {weight:.1%} < {target - band:.0%} → {target:.0%}"))
+    elif weight > target + band:
+        acts.append(("sell_frac", 1 - target / weight, f"비중 {weight:.1%} > {target + band:.0%} → {target:.0%}"))
     if weight > 0 and age >= SOXL_TRIM_AGE and not trimmed:
         acts.append(("sell_frac", 0.5, f"R3 보유 {SOXL_TRIM_AGE}거래일 50% 축소"))
     return acts
@@ -1868,9 +1876,11 @@ def soxl_blocked(price, high252):
     return high252 > 0 and price / high252 - 1 <= SOXL_DD_BLOCK
 
 
-def soxl_orders(account, price, high252, age, trimmed, session):
+def soxl_orders(account, price, high252, age, trimmed, session, target=SOXL_TARGET, band=SOXL_BAND,
+                max_weight=SOXL_MAX_WEIGHT, sma200=None, overlay=False):
     """계좌 → (주문 목록, 대기 사유). 운영은 결정과 체결이 같은 사이클이다(백테스트는 다음 날 종가).
-    ① 전략 밖 보유는 전량 매도(백테스트 계좌 = SOXL + 현금) ② soxl_plan 의도를 현재가로 주문화."""
+    ① 단독 모드면 전략 밖 보유는 전량 매도(백테스트 계좌 = SOXL + 현금) ② soxl_plan 의도를 현재가로 주문화.
+    overlay=True 면 다른 보유는 건드리지 않고, 매수는 sma200 추세 신호가 있을 때 유지선 위 현금으로만 한다."""
     if account.get("open_unknown"):
         return [], ["OPEN_UNKNOWN: 미체결 상태를 몰라 초과 매매 위험 — 보류"]
     frac = fractional_allowed(session)
@@ -1884,7 +1894,7 @@ def soxl_orders(account, price, high252, age, trimmed, session):
                        "reason": f"SOXL 전략 — {why}"})
 
     for sym, h in sorted(holdings.items()):
-        if sym == SOXL_SYMBOL:
+        if overlay or sym == SOXL_SYMBOL:
             continue
         if sym in busy or not frac:
             waiting.append(f"{sym} 정리 대기 ({'미체결' if sym in busy else '정규장 아님'})")
@@ -1893,7 +1903,8 @@ def soxl_orders(account, price, high252, age, trimmed, session):
     h = holdings.get(SOXL_SYMBOL, {"quantity": 0.0, "market_value": 0.0})
     value, qty = h["market_value"], h["quantity"]
     weight = value / total if total > 0 else 0.0
-    acts = soxl_plan(weight, age, trimmed)
+    acts = soxl_plan(weight, age, trimmed, target, band)
+    cash = max(0.0, buy_room(account)) if overlay else account["cash"]
     if acts and (SOXL_SYMBOL in busy or not frac):
         waiting.append(f"{SOXL_SYMBOL} 대기 ({'미체결' if SOXL_SYMBOL in busy else '정규장 아님'}) — {[a[2] for a in acts]}")
         return orders, waiting
@@ -1906,7 +1917,10 @@ def soxl_orders(account, price, high252, age, trimmed, session):
             if soxl_blocked(price, high252):
                 waiting.append(f"{SOXL_SYMBOL} 매수 관망 (252일 고점 대비 {price / high252 - 1:.1%} ≤ {SOXL_DD_BLOCK:.0%})")
                 continue
-            amount = min(x * total - value, SOXL_MAX_WEIGHT * total - value, account["cash"])
+            if sma200 is not None and not price > sma200:     # NaN(200봉 부족)도 신호 없음
+                waiting.append(f"{SOXL_SYMBOL} 매수 신호 없음 (현재가 ${price:.2f} ≤ 200일선 ${sma200:.2f})")
+                continue
+            amount = min(x * total - value, max_weight * total - value, cash)
             if amount < MIN_ORDER_USD:
                 waiting.append(f"{SOXL_SYMBOL} 매수 대기 (가능 금액 ${amount:.2f} < 최소 ${MIN_ORDER_USD} — 매도 체결 후)")
                 continue
@@ -1917,10 +1931,11 @@ def soxl_orders(account, price, high252, age, trimmed, session):
 
 
 def soxl_state(toss, account, entries):
-    """현재가·252일 고점·포지션 나이·R3 축소 여부."""
+    """현재가·252일 고점·200일선·포지션 나이·R3 축소 여부."""
     price = float(toss.prices(SOXL_SYMBOL)[0]["lastPrice"])
     closes = candles(toss, SOXL_SYMBOL, "1d", 260)["close"]
     high252 = max(float(closes.iloc[-251:].max()), price)
+    sma200 = float(closes.iloc[-200:].mean()) if len(closes) >= 200 else float("nan")
     entry = (entries or {}).get(SOXL_SYMBOL) if SOXL_SYMBOL in account["holdings"] else None
     age = (trading_days_since(entry) or 0) + 1 if entry else 0
     trimmed = False
@@ -1930,11 +1945,11 @@ def soxl_state(toss, account, entries):
                 "SELECT COUNT(*) FROM orders WHERE symbol=? AND side='sell' AND reason LIKE '%R3%' AND timestamp>=? "
                 "AND status NOT LIKE 'REJECTED%' AND status NOT LIKE 'DEFERRED%' AND status NOT LIKE 'skipped%' "
                 "AND status != 'DRY_RUN'", (SOXL_SYMBOL, entry)).fetchone()[0] > 0
-    return price, high252, age, trimmed
+    return price, high252, sma200, age, trimmed
 
 
 def run_soxl(toss, run_id, account, session, dry, entries):
-    price, high252, age, trimmed = soxl_state(toss, account, entries)
+    price, high252, _, age, trimmed = soxl_state(toss, account, entries)
     w = account["holdings"].get(SOXL_SYMBOL, {}).get("market_value", 0.0) / account["total_value"]
     log.info("SOXL: 현재가 $%.2f · 252일 고점 대비 %+.1f%% · 비중 %.1f%% (목표 %.0f%%, 밴드 %.0f~%.0f%%) · 포지션 나이 %d일%s",
              price, (price / high252 - 1) * 100, w * 100, SOXL_TARGET * 100, (SOXL_TARGET - SOXL_BAND) * 100,
@@ -1948,6 +1963,40 @@ def run_soxl(toss, run_id, account, session, dry, entries):
     if any(st == "REJECTED" for st in res.values()):
         log.error("SOXL 주문 거절 — 해외 레버리지 ETF 는 기본예탁금·사전교육 요건이 있다. 토스 계좌 권한을 확인할 것")
     return f"SOXL 주문 {len(orders)}건 {dict(collections.Counter(res.values()))} · 대기 {len(waiting)}건"
+
+
+def run_soxl_overlay(toss, run_id, account, session, dry, entries):
+    """LLM 사이클 안에서 SOXL 한 종목만 관리한다 → 주문을 냈으면 True (호출자가 계좌를 다시 읽는다)."""
+    price, high252, sma200, age, trimmed = soxl_state(toss, account, entries)
+    held = SOXL_SYMBOL in account["holdings"]
+    log.info("SOXL 오버레이 (%s): 현재가 $%.2f · 200일선 $%.2f · 252일 고점 대비 %+.1f%% · 비중 %.1f%% "
+             "(목표 %.0f%%, 밴드 %.0f~%.0f%%) · 나이 %d일%s", "보유" if held else "미보유 — 매수 신호만 확인",
+             price, sma200, (price / high252 - 1) * 100,
+             account["holdings"].get(SOXL_SYMBOL, {}).get("market_value", 0.0) / account["total_value"] * 100,
+             SOXL_OV_TARGET * 100, (SOXL_OV_TARGET - SOXL_OV_BAND) * 100, (SOXL_OV_TARGET + SOXL_OV_BAND) * 100,
+             age, " · R3 축소 완료" if trimmed else "")
+    orders, waiting = soxl_orders(account, price, high252, age, trimmed, session, SOXL_OV_TARGET,
+                                  SOXL_OV_BAND, SOXL_OV_MAX, sma200=sma200, overlay=True)
+    for x in waiting:
+        log.info("SOXL %s", x)
+    if not orders:
+        return False
+    res = place_all(toss, run_id, orders, dry, tag="[SOXL]")
+    if any(st == "REJECTED" for st in res.values()):
+        log.error("SOXL 주문 거절 — 해외 레버리지 ETF 는 기본예탁금·사전교육 요건이 있다. 토스 계좌 권한을 확인할 것")
+    return True
+
+
+def without_soxl(account):
+    """LLM 이 보는 계좌: SOXL 보유·미체결·평가액을 뺀다. 손절·만기·노출 축소·유지선 복원이 SOXL 을 팔지 못하게."""
+    if not SOXL_OVERLAY or SOXL_SYMBOL not in account["holdings"]:
+        return account
+    by = account.get("open_by_symbol") or {}
+    return {**account,
+            "holdings": {s: h for s, h in account["holdings"].items() if s != SOXL_SYMBOL},
+            "open_orders": [s for s in account["open_orders"] if s != SOXL_SYMBOL],
+            "open_by_symbol": {s: v for s, v in by.items() if s != SOXL_SYMBOL},
+            "total_value": round(account["total_value"] - account["holdings"][SOXL_SYMBOL]["market_value"], 2)}
 
 
 def reconcile_orders(toss, limit=100):
@@ -2149,6 +2198,13 @@ def run_cycle(dry_run=None, force=False):
             return
         if STRATEGY != "llm":
             raise RuntimeError(f"알 수 없는 STRATEGY={STRATEGY!r} (llm | a1 | soxl) — 주문하지 않는다")
+        if SOXL_OVERLAY:        # SOXL 은 매 사이클 따로 본다. 실패해도 LLM 사이클은 계속한다
+            try:
+                if run_soxl_overlay(toss, run_id, account, session, dry, entries):
+                    account = account_state(toss)
+            except Exception as e:  # noqa: BLE001
+                log.error("SOXL 오버레이 실패(LLM 사이클은 계속): %s", e)
+            account = without_soxl(account)
         # 오버레이 상한은 위험관리 패스(바로 아래)보다 먼저 정해져야 한다 — 축소 매도가 거기서 난다
         BEAR_CAP = bear_derisk(idx)
         if BEAR_CAP is not None:
@@ -2222,7 +2278,7 @@ def run_cycle(dry_run=None, force=False):
             if left:
                 log.error("위험관리 주문이 나가지 못했다: %s — 같은 사이클의 본 패스가 다시 본다",
                           left)
-            account = account_state(toss)      # 슬롯·현금은 체결로만 생긴다 — 다시 읽는다
+            account = without_soxl(account_state(toss))      # 슬롯·현금은 체결로만 생긴다 — 다시 읽는다
         # risk_orders 가 0건이어도 '왜 안 냈는지' 는 남긴다 (사후 분석의 유일한 근거)
         log_skipped(run_id, risk_skipped)
 
@@ -2274,7 +2330,7 @@ def run_cycle(dry_run=None, force=False):
         else:
             plan = {"orders": [], "summary": "매수 여력 없음 · 보유 매도 판단 없음 — 배분(Claude) 생략"}
         log.info("배분 요약: %s", plan["summary"])
-        account = account_state(toss)          # LLM 왕복 동안 바뀐 현금·보유를 반영
+        account = without_soxl(account_state(toss))          # LLM 왕복 동안 바뀐 현금·보유를 반영
         stale = (time.time() - t_snapshot) / 60
         if stale > STALE_MAX_MIN:
             log.error("시세 스냅샷이 %.0f분 낡음 (>%.0f) — 신규 매수는 취소하고 매도만 낸다",
